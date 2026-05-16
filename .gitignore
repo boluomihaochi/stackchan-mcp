@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local environment and secrets
+.env
+.env.*
+firmware/src/config.h
+
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+
+# Other assistant configuration
+CLAUDE.md
+**/CLAUDE.md
+
+# Generated local artifacts
+*.log
