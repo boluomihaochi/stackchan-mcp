@@ -33,7 +33,7 @@ the physical world
 
 ## Requirements
 
-- **Hardware:** M5Stack CoreS3 with servo unit, speaker, microphone, and GC0308 camera
+- **Hardware:** [Stack-chan](https://www.m5stack.com/) (M5Stack CoreS3 + servo unit, speaker, microphone, GC0308 camera). Available as a complete unit from M5Stack (¥699 CNY / $99 USD).
 - **Firmware:** Custom firmware in `firmware/` (PlatformIO, ESP32-S3)
 - **Host:** Python 3.11+, macOS/Linux
 - **TTS:** [Fish Audio](https://fish.audio) API key (recommended) or edge-tts (free, lower quality)
@@ -93,6 +93,8 @@ python mcp-server/server.py --http --port 8002
 ## Faces
 
 Stack-chan has 7 expressions stored as 320x240 PNGs on the device's LittleFS. The default face is a gentle whale with crescent eyes.
+
+> **Note:** The included face PNGs are this particular Stack-chan's face — they were designed for him by his person. You'll probably want to replace them with your own. Drop your own 320x240 PNGs into `firmware/data/` before flashing.
 
 | Expression | Description |
 |-----------|-------------|
