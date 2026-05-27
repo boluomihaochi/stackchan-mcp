@@ -8,6 +8,7 @@
 #include "servo_service.h"
 #include "camera_service.h"
 #include "face_service.h"
+#include "playback_service.h"
 
 static WebServer server(80);
 
@@ -15,6 +16,12 @@ static WebServer server(80);
 static uint8_t* s_wav_buf   = nullptr;
 static size_t   s_wav_size  = 0;
 static bool     s_wav_ready = false;
+
+static uint8_t* s_pcm_upload_buf = nullptr;
+static size_t   s_pcm_upload_size = 0;
+static bool     s_pcm_upload_ready = false;
+
+#define HTTP_PCM_MAX_BYTES (2 * 1024 * 1024)
 
 // ── モードフラグ（false=APIモード / true=MCPモード）
 static bool s_mcp_mode = false;
@@ -50,6 +57,77 @@ static void handlePlay() {
 
     Serial.printf("[HTTP] POST /play -> queued: %s\n", voice_url);
     server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ────────────────────────────────────────────
+// POST /play/pcm
+// body: raw 24kHz mono s16le PCM
+// ────────────────────────────────────────────
+static void handlePlayPcm() {
+    if (!s_pcm_upload_ready || s_pcm_upload_buf == nullptr || s_pcm_upload_size == 0) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"no pcm body\"}");
+        return;
+    }
+
+    const size_t pcmSize = s_pcm_upload_size;
+    bool ok = startPcmPlayback(s_pcm_upload_buf, pcmSize);
+    free(s_pcm_upload_buf);
+    s_pcm_upload_buf = nullptr;
+    s_pcm_upload_size = 0;
+    s_pcm_upload_ready = false;
+
+    if (!ok) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"invalid pcm\"}");
+        return;
+    }
+
+    Serial.printf("[HTTP] POST /play/pcm -> %u bytes\n", (unsigned)pcmSize);
+    server.send(200, "application/json", "{\"success\":true,\"format\":\"s16le\",\"sample_rate\":24000,\"channels\":1}");
+}
+
+static void handlePlayPcmRaw() {
+    HTTPRaw& raw = server.raw();
+
+    if (raw.status == RAW_START) {
+        if (s_pcm_upload_buf) {
+            free(s_pcm_upload_buf);
+        }
+        s_pcm_upload_buf = (uint8_t*)ps_malloc(HTTP_PCM_MAX_BYTES);
+        s_pcm_upload_size = 0;
+        s_pcm_upload_ready = false;
+        if (!s_pcm_upload_buf) {
+            Serial.println("[HTTP] PCM upload alloc failed");
+        }
+        return;
+    }
+
+    if (raw.status == RAW_WRITE) {
+        if (!s_pcm_upload_buf) return;
+        if (raw.currentSize > HTTP_PCM_MAX_BYTES - s_pcm_upload_size) {
+            Serial.println("[HTTP] PCM upload too large");
+            free(s_pcm_upload_buf);
+            s_pcm_upload_buf = nullptr;
+            s_pcm_upload_size = 0;
+            return;
+        }
+        memcpy(s_pcm_upload_buf + s_pcm_upload_size, raw.buf, raw.currentSize);
+        s_pcm_upload_size += raw.currentSize;
+        return;
+    }
+
+    if (raw.status == RAW_END) {
+        s_pcm_upload_ready = s_pcm_upload_buf != nullptr && s_pcm_upload_size > 0;
+        return;
+    }
+
+    if (raw.status == RAW_ABORTED) {
+        if (s_pcm_upload_buf) {
+            free(s_pcm_upload_buf);
+        }
+        s_pcm_upload_buf = nullptr;
+        s_pcm_upload_size = 0;
+        s_pcm_upload_ready = false;
+    }
 }
 
 // ────────────────────────────────────────────
@@ -316,6 +394,7 @@ void storeLastRecording(const uint8_t* wav, size_t size) {
 
 void initHttpServer() {
     server.on("/play",         HTTP_POST, handlePlay);
+    server.on("/play/pcm",     HTTP_POST, handlePlayPcm, handlePlayPcmRaw);
     server.on("/mode",         HTTP_POST, handleMode);
     server.on("/audio/status", HTTP_GET,  handleAudioStatus);
     server.on("/audio",        HTTP_GET,  handleAudio);

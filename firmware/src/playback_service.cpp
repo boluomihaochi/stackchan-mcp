@@ -18,6 +18,9 @@ static uint16_t currentBytesPerFrame = 2;
 #define LIPSYNC_CHUNK_SAMPLES 1024
 #define DOWNLOAD_TIMEOUT_MS   10000
 #define MAX_WAV_BYTES         (4 * 1024 * 1024)
+#define PCM_SAMPLE_RATE       24000
+#define PCM_BYTES_PER_SAMPLE  2
+#define MAX_PCM_BYTES         (2 * 1024 * 1024)
 
 // ── FreeRTOS: URLをCore 0に渡すキュー
 //    StringはFreeRTOSキューに乗せられないのでchar配列で渡す
@@ -236,6 +239,74 @@ void checkPendingPlayback() {
     isPlaying     = true;
     playbackStartMs  = millis();
     Serial.println("[PLAY] Speaker started");
+}
+
+bool startPcmPlayback(const uint8_t* pcmData, size_t pcmSize) {
+    if (!pcmData || pcmSize == 0) {
+        Serial.println("[PCM] Empty body");
+        return false;
+    }
+    if ((pcmSize % PCM_BYTES_PER_SAMPLE) != 0 || pcmSize > MAX_PCM_BYTES) {
+        Serial.printf("[PCM] Invalid size: %u\n", (unsigned)pcmSize);
+        return false;
+    }
+
+    if (currentWavData) {
+        free(currentWavData);
+        currentWavData = nullptr;
+        currentWavSize = 0;
+    }
+
+    uint8_t* copied = (uint8_t*)ps_malloc(pcmSize);
+    if (!copied) {
+        Serial.println("[PCM] ps_malloc failed");
+        return false;
+    }
+    memcpy(copied, pcmData, pcmSize);
+
+    currentWavData = copied;
+    currentWavSize = pcmSize;
+    currentPcmOffset = 0;
+    currentPcmSize = pcmSize;
+    currentSampleRate = PCM_SAMPLE_RATE;
+    currentBytesPerFrame = PCM_BYTES_PER_SAMPLE;
+
+    const float bytes_per_sec = (float)PCM_SAMPLE_RATE * (float)PCM_BYTES_PER_SAMPLE;
+    playbackDeadlineMs = millis() +
+        (unsigned long)((pcmSize / bytes_per_sec) * 1000.0f) + 2000;
+
+    if (M5.Mic.isRunning()) {
+        M5.Mic.end();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (!M5.Speaker.isRunning()) {
+        M5.Speaker.begin();
+    }
+
+    M5.Speaker.setVolume(SPEAKER_VOLUME);
+    bool ok = M5.Speaker.playRaw((const int16_t*)currentWavData,
+                                 currentWavSize / sizeof(int16_t),
+                                 PCM_SAMPLE_RATE,
+                                 false,
+                                 1,
+                                 -1,
+                                 true);
+    if (!ok) {
+        Serial.println("[PCM] Speaker rejected playRaw");
+        free(currentWavData);
+        currentWavData = nullptr;
+        currentWavSize = 0;
+        setFaceExpression(FACE_IDLE);
+        return false;
+    }
+
+    setFaceExpression(FACE_PLAYING);
+    lipSyncOffset = 0;
+    lastLipMs = 0;
+    isPlaying = true;
+    playbackStartMs = millis();
+    Serial.printf("[PCM] Speaker started: %u bytes @ 24kHz mono s16le\n", (unsigned)pcmSize);
+    return true;
 }
 
 // ════════════════════════════════════════
