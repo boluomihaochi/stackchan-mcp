@@ -30,6 +30,7 @@ the physical world
 | `stackchan_shake` | Shake head no |
 | `stackchan_home` | Return to center |
 | `stackchan_status` | Check connection |
+| `stackchan_playback_status` | Check playback queues, mic state, gesture state, heap, and PSRAM |
 
 ## Requirements
 
@@ -64,6 +65,10 @@ export STACKCHAN_IP="192.0.2.20"       # your Stack-chan's IP
 export MAC_IP="10.83.20.149"             # your host machine's IP
 export FISH_AUDIO_KEY="your_key_here"    # Fish Audio API key
 ```
+
+For Streamable HTTP mode, `./start-http.sh` also reads project-root `.env`
+overrides such as `STACKCHAN_PORT`, `MCP_PYTHON`, `STACKCHAN_PUBLIC_MCP_URL`,
+and `STACKCHAN_LOG_DIR`.
 
 ### 4. Register with Claude Code
 

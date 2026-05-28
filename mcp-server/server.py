@@ -14,6 +14,7 @@ Usage:
 
 import logging
 import os
+import struct
 import subprocess
 import sys as _sys
 import threading
@@ -27,6 +28,30 @@ from pathlib import Path
 import requests
 from mcp.server.fastmcp import FastMCP, Image
 
+logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s; using %.2f", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s; using %d", name, raw, default)
+        return default
+
 # ── Configuration ──────────────────────────────────────────
 STACKCHAN_IP = os.environ.get("STACKCHAN_IP", "192.0.2.20")
 STACKCHAN_PORT = int(os.environ.get("STACKCHAN_PORT", 80))
@@ -35,6 +60,12 @@ AUDIO_SERVE_PORT = int(os.environ.get("AUDIO_SERVE_PORT", 5060))
 
 # TTS settings
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "fish-audio")  # "edge-tts" or "fish-audio"
+STACKCHAN_AUDIO_MODE = os.environ.get("STACKCHAN_AUDIO_MODE", "auto").lower()
+STACKCHAN_SAVE_PCM = os.environ.get("STACKCHAN_SAVE_PCM", "0").lower() in {"1", "true", "yes"}
+PCM_GAIN = _env_float("STACKCHAN_PCM_GAIN", 0.75)
+PCM_LIMIT = _env_float("STACKCHAN_PCM_LIMIT", 0.90)
+PCM_DECLICK_SAMPLES = _env_int("STACKCHAN_PCM_DECLICK_SAMPLES", 64)
+PCM_ZERO_CROSS_WINDOW = _env_int("STACKCHAN_PCM_ZERO_CROSS_WINDOW", 256)
 EDGE_TTS_BIN = os.environ.get("EDGE_TTS_BIN", "/Users/Isa/Kokoro-TTS-Local/venv/bin/edge-tts")
 FISH_AUDIO_KEY = os.environ.get("FISH_AUDIO_KEY", "")
 FISH_AUDIO_MODEL_ZH = os.environ.get("FISH_AUDIO_MODEL_ZH", "411d04608a3a498192e16724689e7993")  # 夏以昼
@@ -45,8 +76,15 @@ PCM_SAMPLE_WIDTH = 2
 PCM_CONTENT_TYPE = "audio/x-raw;format=s16le;rate=24000;channels=1"
 MAX_PCM_PAYLOAD_BYTES = 2 * 1024 * 1024
 PCM_SEGMENT_BYTES = 48 * 1024
+VALID_AUDIO_MODES = {"auto", "pcm", "wav"}
 
-logger = logging.getLogger(__name__)
+if STACKCHAN_AUDIO_MODE not in VALID_AUDIO_MODES:
+    logger.warning("Invalid STACKCHAN_AUDIO_MODE=%s; using auto", STACKCHAN_AUDIO_MODE)
+    STACKCHAN_AUDIO_MODE = "auto"
+PCM_GAIN = max(0.0, min(PCM_GAIN, 1.0))
+PCM_LIMIT = max(0.1, min(PCM_LIMIT, 1.0))
+PCM_DECLICK_SAMPLES = max(0, min(PCM_DECLICK_SAMPLES, PCM_SEGMENT_BYTES // PCM_SAMPLE_WIDTH))
+PCM_ZERO_CROSS_WINDOW = max(0, min(PCM_ZERO_CROSS_WINDOW, PCM_SEGMENT_BYTES // PCM_SAMPLE_WIDTH))
 
 
 class PcmPlaybackError(RuntimeError):
@@ -226,6 +264,73 @@ def validate_pcm_contract(sample_rate: int, channels: int, sample_width: int) ->
         )
 
 
+def condition_pcm_chunk(chunk: bytes) -> tuple[bytes, int]:
+    """Apply conservative gain and peak limiting to signed 16-bit PCM."""
+    if not chunk:
+        return chunk, 0
+    if len(chunk) % PCM_SAMPLE_WIDTH != 0:
+        raise ValueError(f"invalid PCM payload size: {len(chunk)}")
+
+    peak = int(32767 * PCM_LIMIT)
+    out = bytearray(len(chunk))
+    limited = 0
+    for offset in range(0, len(chunk), PCM_SAMPLE_WIDTH):
+        sample = struct.unpack_from("<h", chunk, offset)[0]
+        scaled = int(sample * PCM_GAIN)
+        if scaled > peak:
+            scaled = peak
+            limited += 1
+        elif scaled < -peak:
+            scaled = -peak
+            limited += 1
+        struct.pack_into("<h", out, offset, scaled)
+    return bytes(out), limited
+
+
+def declick_pcm_segment(segment: bytes, previous_tail_sample: int | None) -> tuple[bytes, int]:
+    """Ramp the start of a segment from the previous segment's last sample."""
+    if previous_tail_sample is None or PCM_DECLICK_SAMPLES == 0:
+        return segment, 0
+    if len(segment) % PCM_SAMPLE_WIDTH != 0:
+        raise ValueError(f"invalid PCM payload size: {len(segment)}")
+
+    sample_count = len(segment) // PCM_SAMPLE_WIDTH
+    ramp_samples = min(PCM_DECLICK_SAMPLES, sample_count)
+    out = bytearray(segment)
+    for index in range(ramp_samples):
+        current = struct.unpack_from("<h", segment, index * PCM_SAMPLE_WIDTH)[0]
+        weight = (index + 1) / (ramp_samples + 1)
+        smoothed = round(previous_tail_sample + (current - previous_tail_sample) * weight)
+        struct.pack_into("<h", out, index * PCM_SAMPLE_WIDTH, smoothed)
+    return bytes(out), ramp_samples
+
+
+def choose_pcm_segment_cut(buffer: bytearray, target_bytes: int) -> int:
+    """Choose a segment boundary near a low-amplitude sample before target."""
+    target_bytes -= target_bytes % PCM_SAMPLE_WIDTH
+    if len(buffer) <= target_bytes or PCM_ZERO_CROSS_WINDOW == 0:
+        return target_bytes
+
+    target_sample = target_bytes // PCM_SAMPLE_WIDTH
+    start_sample = max(1, target_sample - PCM_ZERO_CROSS_WINDOW)
+    best_sample = target_sample
+    best_score = abs(struct.unpack_from("<h", buffer, target_bytes - PCM_SAMPLE_WIDTH)[0])
+
+    for sample_index in range(start_sample, target_sample):
+        prev_sample = struct.unpack_from("<h", buffer, (sample_index - 1) * PCM_SAMPLE_WIDTH)[0]
+        sample = struct.unpack_from("<h", buffer, sample_index * PCM_SAMPLE_WIDTH)[0]
+        score = abs(sample)
+        if (prev_sample <= 0 <= sample) or (prev_sample >= 0 >= sample):
+            score = -1
+        if score < best_score:
+            best_score = score
+            best_sample = sample_index
+            if score == -1:
+                break
+
+    return max(PCM_SAMPLE_WIDTH, best_sample * PCM_SAMPLE_WIDTH)
+
+
 def iter_fish_pcm_stream(text: str, lang: str = "zh"):
     """Yield Fish Audio TTS as 24kHz mono s16le PCM chunks."""
     validate_pcm_contract(PCM_SAMPLE_RATE, PCM_CHANNELS, PCM_SAMPLE_WIDTH)
@@ -254,7 +359,11 @@ def iter_fish_pcm_stream(text: str, lang: str = "zh"):
 
 
 def can_stream_pcm() -> bool:
-    return TTS_ENGINE == "fish-audio" and bool(FISH_AUDIO_KEY)
+    return (
+        STACKCHAN_AUDIO_MODE != "wav"
+        and TTS_ENGINE == "fish-audio"
+        and bool(FISH_AUDIO_KEY)
+    )
 
 
 # ── M5Stack Communication ────────────────────────────────
@@ -277,11 +386,19 @@ def stackchan_play_pcm(pcm_chunks) -> dict:
     segment_index = 0
     started = False
     pending_segment = None
+    limited_samples = 0
+    declicked_samples = 0
+    last_segment_tail_sample = None
+    saved_pcm_path = AUDIO_DIR / f"diag_{session_id}.pcm" if STACKCHAN_SAVE_PCM else None
+    saved_pcm_file = saved_pcm_path.open("wb") if saved_pcm_path is not None else None
 
     def post_segment(segment: bytes, *, final: bool) -> dict:
-        nonlocal segment_index, started
+        nonlocal declicked_samples, last_segment_tail_sample, segment_index, started
         if not segment or len(segment) % PCM_SAMPLE_WIDTH != 0:
             raise ValueError(f"invalid PCM payload size: {len(segment)}")
+        segment, declicked = declick_pcm_segment(segment, last_segment_tail_sample)
+        declicked_samples += declicked
+        last_segment_tail_sample = struct.unpack_from("<h", segment, len(segment) - PCM_SAMPLE_WIDTH)[0]
         url = (
             f"http://{STACKCHAN_IP}:{STACKCHAN_PORT}/play/pcm"
             f"?session={session_id}&seq={segment_index}&final={1 if final else 0}"
@@ -313,50 +430,89 @@ def stackchan_play_pcm(pcm_chunks) -> dict:
             raise PcmPlaybackError(f"PCM segment play failed: {result}", started=started)
         started = True
         logger.info(
-            "Posted PCM segment session=%s seq=%d bytes=%d final=%s queued=%s",
+            "Posted PCM segment session=%s seq=%d bytes=%d final=%s queued=%s total=%d declick=%d",
             session_id,
             segment_index,
             len(segment),
             final,
             result.get("queued"),
+            total_size,
+            declicked,
         )
         segment_index += 1
         return result
 
-    for chunk in pcm_chunks:
-        if not chunk:
-            continue
-        total_size += len(chunk)
-        if total_size > MAX_PCM_PAYLOAD_BYTES:
-            message = (
-                "PCM payload too large: "
-                f"{total_size} bytes exceeds {MAX_PCM_PAYLOAD_BYTES} byte limit"
-            )
+    try:
+        for chunk in pcm_chunks:
+            if not chunk:
+                continue
+            total_size += len(chunk)
+            if total_size > MAX_PCM_PAYLOAD_BYTES:
+                message = (
+                    "PCM payload too large: "
+                    f"{total_size} bytes exceeds {MAX_PCM_PAYLOAD_BYTES} byte limit"
+                )
+                if started:
+                    raise PcmPlaybackError(message, started=True)
+                raise ValueError(message)
+            if saved_pcm_file is not None:
+                saved_pcm_file.write(chunk)
+            try:
+                conditioned_chunk, limited = condition_pcm_chunk(chunk)
+            except ValueError as exc:
+                if started:
+                    raise PcmPlaybackError(str(exc), started=True) from exc
+                raise
+            limited_samples += limited
+            buffer.extend(conditioned_chunk)
+            while len(buffer) >= PCM_SEGMENT_BYTES:
+                segment_size = PCM_SEGMENT_BYTES - (PCM_SEGMENT_BYTES % PCM_SAMPLE_WIDTH)
+                segment_size = choose_pcm_segment_cut(buffer, segment_size)
+                if pending_segment is not None:
+                    last_result = post_segment(pending_segment, final=False)
+                pending_segment = bytes(buffer[:segment_size])
+                del buffer[:segment_size]
+
+        if not buffer and pending_segment is None and last_result is None:
+            raise ValueError("invalid PCM payload size: 0")
+        if len(buffer) % PCM_SAMPLE_WIDTH != 0:
+            message = f"invalid PCM payload size: {len(buffer)}"
             if started:
                 raise PcmPlaybackError(message, started=True)
             raise ValueError(message)
-        buffer.extend(chunk)
-        while len(buffer) >= PCM_SEGMENT_BYTES:
-            segment_size = PCM_SEGMENT_BYTES - (PCM_SEGMENT_BYTES % PCM_SAMPLE_WIDTH)
+        if buffer:
             if pending_segment is not None:
                 last_result = post_segment(pending_segment, final=False)
-            pending_segment = bytes(buffer[:segment_size])
-            del buffer[:segment_size]
+            last_result = post_segment(bytes(buffer), final=True)
+        elif pending_segment is not None:
+            last_result = post_segment(pending_segment, final=True)
+    finally:
+        if saved_pcm_file is not None:
+            saved_pcm_file.close()
 
-    if not buffer and pending_segment is None and last_result is None:
-        raise ValueError("invalid PCM payload size: 0")
-    if len(buffer) % PCM_SAMPLE_WIDTH != 0:
-        message = f"invalid PCM payload size: {len(buffer)}"
-        if started:
-            raise PcmPlaybackError(message, started=True)
-        raise ValueError(message)
-    if buffer:
-        if pending_segment is not None:
-            last_result = post_segment(pending_segment, final=False)
-        last_result = post_segment(bytes(buffer), final=True)
-    elif pending_segment is not None:
-        last_result = post_segment(pending_segment, final=True)
-    return last_result or {"success": False, "error": "no pcm"}
+    result = last_result or {"success": False, "error": "no pcm"}
+    result.setdefault("session", session_id)
+    result.setdefault("segments", segment_index)
+    result.setdefault("total_bytes", total_size)
+    result.setdefault("pcm_gain", PCM_GAIN)
+    result.setdefault("pcm_limit", PCM_LIMIT)
+    result.setdefault("limited_samples", limited_samples)
+    result.setdefault("declick_samples", PCM_DECLICK_SAMPLES)
+    result.setdefault("declicked_samples", declicked_samples)
+    if saved_pcm_path is not None:
+        result.setdefault("saved_pcm", str(saved_pcm_path))
+    logger.info(
+        "PCM playback complete session=%s segments=%d total=%d gain=%.2f limit=%.2f limited=%d declicked=%d saved=%s",
+        session_id,
+        segment_index,
+        total_size,
+        PCM_GAIN,
+        PCM_LIMIT,
+        limited_samples,
+        declicked_samples,
+        saved_pcm_path,
+    )
+    return result
 
 
 def stackchan_get_audio() -> bytes | None:
@@ -374,6 +530,15 @@ def stackchan_audio_status() -> dict:
     """Check if Stack-chan has a recording ready."""
     resp = requests.get(
         f"http://{STACKCHAN_IP}:{STACKCHAN_PORT}/audio/status",
+        timeout=3,
+    )
+    return resp.json()
+
+
+def stackchan_playback_status_raw() -> dict:
+    """Fetch playback and runtime diagnostics from Stack-chan firmware."""
+    resp = requests.get(
+        f"http://{STACKCHAN_IP}:{STACKCHAN_PORT}/playback/status",
         timeout=3,
     )
     return resp.json()
@@ -466,24 +631,51 @@ def stackchan_say(text: str, lang: str = "zh") -> str:
 
     try:
         pcm_fallback_reason = None
+        logger.info(
+            "stackchan_say audio_mode=%s tts_engine=%s fish_key=%s save_pcm=%s",
+            STACKCHAN_AUDIO_MODE,
+            TTS_ENGINE,
+            bool(FISH_AUDIO_KEY),
+            STACKCHAN_SAVE_PCM,
+        )
         if can_stream_pcm():
             try:
                 result = stackchan_play_pcm(iter_fish_pcm_stream(text, lang))
                 if result.get("success"):
-                    return f"🗣️ Stack-chan is saying: \"{text[:60]}{'…' if len(text)>60 else ''}\" [Fish Audio PCM/{lang}]"
+                    diag = (
+                        f" session={result.get('session', '?')}"
+                        f" segments={result.get('segments', '?')}"
+                        f" bytes={result.get('total_bytes', '?')}"
+                        f" gain={result.get('pcm_gain', '?')}"
+                        f" limited={result.get('limited_samples', '?')}"
+                        f" declicked={result.get('declicked_samples', '?')}"
+                    )
+                    if result.get("saved_pcm"):
+                        diag += f" saved={result['saved_pcm']}"
+                    return f"🗣️ Stack-chan is saying: \"{text[:60]}{'…' if len(text)>60 else ''}\" [Fish Audio PCM/{lang}{diag}]"
                 pcm_fallback_reason = f"PCM play returned {result}"
+                if STACKCHAN_AUDIO_MODE == "pcm":
+                    return f"❌ PCM play failed: {result}"
                 logger.warning("Falling back to WAV TTS: %s", pcm_fallback_reason)
             except PcmPlaybackError as exc:
                 if exc.started:
                     logger.error("PCM playback failed after audio started: %s", exc)
                     return f"❌ PCM playback failed after audio started: {exc}"
                 pcm_fallback_reason = str(exc)
+                if STACKCHAN_AUDIO_MODE == "pcm":
+                    logger.error("PCM playback failed in forced PCM mode: %s", exc)
+                    return f"❌ PCM playback failed: {exc}"
                 logger.warning("Falling back to WAV TTS after PCM failure: %s", exc)
             except Exception as exc:
                 # Keep the stable WAV path as a fallback when streaming is unavailable
                 # or firmware rejects the PCM endpoint.
                 pcm_fallback_reason = str(exc)
+                if STACKCHAN_AUDIO_MODE == "pcm":
+                    logger.error("PCM playback failed in forced PCM mode: %s", exc)
+                    return f"❌ PCM playback failed: {exc}"
                 logger.warning("Falling back to WAV TTS after PCM failure: %s", exc)
+        elif STACKCHAN_AUDIO_MODE == "pcm":
+            return "❌ PCM playback unavailable: TTS_ENGINE must be fish-audio and FISH_AUDIO_KEY must be set"
 
         wav_path = generate_tts(text, lang)
         validate_playback_wav(wav_path)
@@ -493,7 +685,8 @@ def stackchan_say(text: str, lang: str = "zh") -> str:
         if result.get("success"):
             engine = "Fish Audio" if (TTS_ENGINE == "fish-audio" and FISH_AUDIO_KEY) else "edge-tts"
             fallback_note = " (PCM fallback)" if pcm_fallback_reason else ""
-            return f"🗣️ Stack-chan is saying: \"{text[:60]}{'…' if len(text)>60 else ''}\" [{engine}/{lang}]{fallback_note}"
+            mode_note = f" mode={STACKCHAN_AUDIO_MODE}"
+            return f"🗣️ Stack-chan is saying: \"{text[:60]}{'…' if len(text)>60 else ''}\" [{engine} WAV/{lang}{mode_note}]{fallback_note}"
         else:
             return f"❌ Play failed: {result}"
     except Exception as e:
@@ -651,6 +844,29 @@ def stackchan_status() -> str:
     try:
         status = stackchan_audio_status()
         return f"✅ Stack-chan online at {STACKCHAN_IP} | Mode: {status.get('mode', '?')} | Recording ready: {status.get('ready', '?')}"
+    except requests.exceptions.ConnectionError:
+        return f"❌ Stack-chan offline (cannot reach {STACKCHAN_IP})"
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+
+@mcp.tool()
+def stackchan_playback_status() -> str:
+    """Check Stack-chan playback, queue, memory, and gesture diagnostics."""
+    try:
+        status = stackchan_playback_status_raw()
+        return (
+            "Playback "
+            f"kind={status.get('kind', '?')} "
+            f"playing={status.get('playing', '?')} "
+            f"pcm_queue={status.get('queued_pcm_segments', '?')}/"
+            f"{status.get('queued_pcm_bytes', '?')}B "
+            f"audio_queue={status.get('audio_queue_depth', '?')} "
+            f"mic={status.get('mic_state', '?')} "
+            f"gesture={status.get('gesture', '?')} "
+            f"heap={status.get('free_heap', '?')} "
+            f"psram={status.get('free_psram', '?')}"
+        )
     except requests.exceptions.ConnectionError:
         return f"❌ Stack-chan offline (cannot reach {STACKCHAN_IP})"
     except Exception as e:

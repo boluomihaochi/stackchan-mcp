@@ -29,11 +29,6 @@ static uint16_t currentBytesPerFrame = 2;
 #define MAX_URL_LEN 256
 static QueueHandle_t s_downloadQueue = nullptr;
 
-// ── Core 0 → Core 1 へダウンロード完了を通知するフラグ
-static volatile bool s_pendingReady = false;
-static uint8_t*      s_pendingData  = nullptr;
-static size_t        s_pendingSize  = 0;
-
 struct PcmBuffer {
     uint8_t* data;
     size_t size;
@@ -41,11 +36,19 @@ struct PcmBuffer {
     bool finalSegment;
 };
 
+struct DownloadedAudio {
+    uint8_t* data;
+    size_t size;
+};
+
 static std::queue<PcmBuffer> s_pcmQueue;
 static size_t s_pcmQueuedBytes = 0;
 static bool s_currentPlaybackIsPcm = false;
 static String s_currentPcmSessionId = "";
 static bool s_currentPcmFinalSegment = false;
+static QueueHandle_t s_downloadCompleteQueue = nullptr;
+static uint8_t* s_retiredPlaybackData = nullptr;
+static size_t s_retiredPlaybackSize = 0;
 
 struct WavInfo {
     size_t dataOffset;
@@ -160,8 +163,33 @@ static bool enqueuePcmBuffer(uint8_t* pcmData, size_t pcmSize, const String& ses
     return true;
 }
 
+static void releaseRetiredPlaybackBuffer() {
+    if (!s_retiredPlaybackData) {
+        return;
+    }
+    Serial.printf("[PLAY] Releasing retired playback buffer: bytes=%u\n",
+                  (unsigned)s_retiredPlaybackSize);
+    free(s_retiredPlaybackData);
+    s_retiredPlaybackData = nullptr;
+    s_retiredPlaybackSize = 0;
+}
+
+void retireCurrentPlaybackBuffer() {
+    releaseRetiredPlaybackBuffer();
+    if (!currentWavData) {
+        return;
+    }
+    Serial.printf("[PLAY] Retiring playback buffer: bytes=%u speakerPlaying=%s\n",
+                  (unsigned)currentWavSize,
+                  M5.Speaker.isPlaying() ? "true" : "false");
+    s_retiredPlaybackData = currentWavData;
+    s_retiredPlaybackSize = currentWavSize;
+    currentWavData = nullptr;
+    currentWavSize = 0;
+}
+
 // ════════════════════════════════════════
-//  ダウンロードタスク（Core 0で動く）
+//  ダウンロードタスク（loop()とは別タスクで動く）
 //  loop()をブロックしないための分離
 // ════════════════════════════════════════
 static void downloadTask(void* arg) {
@@ -173,14 +201,13 @@ static void downloadTask(void* arg) {
         size_t   size = 0;
 
         if (downloadVoice(String(url), &data, &size)) {
-            // 前の未処理データがあれば解放
-            if (s_pendingData) {
-                free(s_pendingData);
-                s_pendingData = nullptr;
+            DownloadedAudio completed = {data, size};
+            if (!s_downloadCompleteQueue ||
+                xQueueSend(s_downloadCompleteQueue, &completed, 0) != pdTRUE) {
+                Serial.println("[DOWNLOAD] Complete queue full; dropping audio");
+                free(data);
+                continue;
             }
-            s_pendingData  = data;
-            s_pendingSize  = size;
-            s_pendingReady = true;  // Core 1に通知
             Serial.printf("[DOWNLOAD] Ready: %u bytes\n", (unsigned)size);
         } else {
             Serial.println("[DOWNLOAD] Failed");
@@ -194,6 +221,11 @@ static void downloadTask(void* arg) {
 // ════════════════════════════════════════
 void initPlayback() {
     s_downloadQueue = xQueueCreate(4, sizeof(char) * MAX_URL_LEN);
+    s_downloadCompleteQueue = xQueueCreate(2, sizeof(DownloadedAudio));
+    if (!s_downloadQueue || !s_downloadCompleteQueue) {
+        Serial.println("[PLAY] Failed to create playback queues");
+        return;
+    }
     xTaskCreatePinnedToCore(
         downloadTask,
         "downloadTask",
@@ -201,7 +233,7 @@ void initPlayback() {
         nullptr,
         1,
         nullptr,
-        1   // Core 0（Arduinoのloop()はCore 1）
+        1   // Core 1
     );
     Serial.println("[PLAY] Download task started on Core 1");
 }
@@ -217,7 +249,10 @@ void startPlayback(const AudioTask& task) {
     }
     char url[MAX_URL_LEN];
     task.voice_url.toCharArray(url, MAX_URL_LEN);
-    xQueueSend(s_downloadQueue, url, 0);  // ノンブロッキング
+    if (xQueueSend(s_downloadQueue, url, 0) != pdTRUE) {
+        Serial.printf("[PLAY] Download queue full; dropped: %s\n", url);
+        return;
+    }
     setFaceExpression(FACE_THINKING);
     Serial.printf("[PLAY] Queued for download: %s\n", url);
 }
@@ -226,28 +261,18 @@ void startPlayback(const AudioTask& task) {
 //  ダウンロード完了チェック → Speaker起動
 //  loop()から毎回呼ぶ（Core 1でSpeaker操作するために分離）
 // ════════════════════════════════════════
-void checkPendingPlayback() {
-    if (!s_pendingReady) return;
-    s_pendingReady = false;
-
-    // 前の再生データを解放
-    if (currentWavData) {
-        free(currentWavData);
-    }
-    currentWavData = s_pendingData;
-    currentWavSize = s_pendingSize;
-    s_pendingData  = nullptr;
-    s_pendingSize  = 0;
-
+static bool startDownloadedWavPlayback(uint8_t* wavData, size_t wavSize) {
     WavInfo wavInfo;
-    if (!parseWavInfo(currentWavData, currentWavSize, &wavInfo)) {
+    if (!parseWavInfo(wavData, wavSize, &wavInfo)) {
         Serial.println("[PLAY] Refusing invalid WAV");
-        free(currentWavData);
-        currentWavData = nullptr;
-        currentWavSize = 0;
+        free(wavData);
         setFaceExpression(FACE_IDLE);
-        return;
+        return false;
     }
+
+    retireCurrentPlaybackBuffer();
+    currentWavData = wavData;
+    currentWavSize = wavSize;
     currentPcmOffset = wavInfo.dataOffset;
     currentPcmSize = wavInfo.dataSize;
     currentSampleRate = wavInfo.sampleRate;
@@ -269,7 +294,14 @@ void checkPendingPlayback() {
 
     Serial.println("[PLAY] Mic stopped");
     M5.Speaker.setVolume(SPEAKER_VOLUME);
-    M5.Speaker.playWav(currentWavData, currentWavSize);
+    bool ok = M5.Speaker.playWav(currentWavData, currentWavSize);
+    if (!ok) {
+        Serial.println("[PLAY] Speaker rejected playWav");
+        retireCurrentPlaybackBuffer();
+        setFaceExpression(FACE_IDLE);
+        micResumeRequested = true;
+        return false;
+    }
     setFaceExpression(FACE_PLAYING);
 
     lipSyncOffset = currentPcmOffset;
@@ -281,6 +313,19 @@ void checkPendingPlayback() {
     clearQueuedPcmPlayback();
     playbackStartMs  = millis();
     Serial.println("[PLAY] Speaker started");
+    return true;
+}
+
+void checkPendingPlayback() {
+    if (isPlaying || !s_downloadCompleteQueue) {
+        return;
+    }
+
+    DownloadedAudio completed = {};
+    if (xQueueReceive(s_downloadCompleteQueue, &completed, 0) != pdTRUE) {
+        return;
+    }
+    startDownloadedWavPlayback(completed.data, completed.size);
 }
 
 PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const String& sessionId, bool finalSegment) {
@@ -310,11 +355,7 @@ PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const Strin
         clearQueuedPcmPlayback();
     }
 
-    if (currentWavData) {
-        free(currentWavData);
-        currentWavData = nullptr;
-        currentWavSize = 0;
-    }
+    retireCurrentPlaybackBuffer();
 
     currentWavData = pcmData;
     currentWavSize = pcmSize;
@@ -345,8 +386,10 @@ PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const Strin
                                  true);
     if (!ok) {
         Serial.println("[PCM] Speaker rejected playRaw");
+        free(currentWavData);
         currentWavData = nullptr;
         currentWavSize = 0;
+        currentPcmSize = 0;
         setFaceExpression(FACE_IDLE);
         micResumeRequested = true;
         return PCM_PLAYBACK_SPEAKER_FAILED;
@@ -397,6 +440,20 @@ void updateLipSync() {
     }
     setMouthOpen(constrain(sqrtf(sum / samples) * 8.0f, 0.0f, 1.0f));
     lipSyncOffset += samples * sizeof(int16_t);
+}
+
+PlaybackStatus getPlaybackStatus() {
+    PlaybackStatus status;
+    status.playing = isPlaying;
+    status.pcm = s_currentPlaybackIsPcm;
+    status.pcmFinalSegment = s_currentPcmFinalSegment;
+    status.pcmSession = s_currentPcmSessionId.c_str();
+    status.currentBytes = currentWavSize;
+    status.queuedPcmBytes = s_pcmQueuedBytes;
+    status.queuedPcmSegments = s_pcmQueue.size();
+    status.startedMs = playbackStartMs;
+    status.deadlineMs = playbackDeadlineMs;
+    return status;
 }
 
 // ════════════════════════════════════════
@@ -499,12 +556,19 @@ void processAudioQueue() {
             nextPcm.finalSegment
         );
         if (result != PCM_PLAYBACK_OK) {
-            free(nextPcm.data);
+            if (result != PCM_PLAYBACK_SPEAKER_FAILED) {
+                free(nextPcm.data);
+            }
             Serial.printf("[PCM] Dropped queued segment: result=%d\n", result);
         }
         if (isPlaying) {
             return;
         }
+    }
+
+    checkPendingPlayback();
+    if (isPlaying) {
+        return;
     }
 
     if (audioQueue.empty()) {

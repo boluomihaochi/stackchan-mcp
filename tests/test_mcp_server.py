@@ -1,4 +1,5 @@
 import importlib.util
+import struct
 import sys
 import types
 import wave
@@ -24,8 +25,7 @@ class FakeFastMCP:
         return None
 
 
-@pytest.fixture()
-def server_module(monkeypatch):
+def load_server_module(monkeypatch):
     fake_mcp_package = types.ModuleType("mcp")
     fake_mcp_server = types.ModuleType("mcp.server")
     fake_fastmcp = types.ModuleType("mcp.server.fastmcp")
@@ -45,6 +45,11 @@ def server_module(monkeypatch):
     return module
 
 
+@pytest.fixture()
+def server_module(monkeypatch):
+    return load_server_module(monkeypatch)
+
+
 def test_expected_mcp_tools_are_registered(server_module):
     assert set(server_module.mcp.tools) == {
         "stackchan_say",
@@ -56,6 +61,7 @@ def test_expected_mcp_tools_are_registered(server_module):
         "stackchan_see",
         "stackchan_home",
         "stackchan_status",
+        "stackchan_playback_status",
     }
 
 
@@ -64,6 +70,20 @@ def test_audio_url_uses_configured_host_and_port(server_module):
     server_module.AUDIO_SERVE_PORT = 5099
 
     assert server_module.audio_url("hello.wav") == "http://192.0.2.10:5099/hello.wav"
+
+
+def test_invalid_pcm_env_values_fall_back_to_defaults(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_PCM_GAIN", "loud")
+    monkeypatch.setenv("STACKCHAN_PCM_LIMIT", "hot")
+    monkeypatch.setenv("STACKCHAN_PCM_DECLICK_SAMPLES", "many")
+    monkeypatch.setenv("STACKCHAN_PCM_ZERO_CROSS_WINDOW", "wide")
+
+    module = load_server_module(monkeypatch)
+
+    assert module.PCM_GAIN == 0.75
+    assert module.PCM_LIMIT == 0.90
+    assert module.PCM_DECLICK_SAMPLES == 64
+    assert module.PCM_ZERO_CROSS_WINDOW == 256
 
 
 def test_move_clamps_inputs_before_http_call(server_module, monkeypatch):
@@ -101,6 +121,30 @@ def test_listen_does_not_consume_audio_when_not_ready(server_module, monkeypatch
     monkeypatch.setattr(server_module, "stackchan_get_audio", fail_if_called)
 
     assert "No recording ready" in server_module.stackchan_listen()
+
+
+def test_playback_status_formats_runtime_diagnostics(server_module, monkeypatch):
+    monkeypatch.setattr(
+        server_module,
+        "stackchan_playback_status_raw",
+        lambda: {
+            "kind": "pcm",
+            "playing": True,
+            "queued_pcm_segments": 2,
+            "queued_pcm_bytes": 98304,
+            "audio_queue_depth": 1,
+            "mic_state": "idle",
+            "gesture": "none",
+            "free_heap": 123456,
+            "free_psram": 654321,
+        },
+    )
+
+    result = server_module.stackchan_playback_status()
+
+    assert "kind=pcm" in result
+    assert "pcm_queue=2/98304B" in result
+    assert "psram=654321" in result
 
 
 def write_wav(
@@ -226,6 +270,7 @@ def test_stackchan_say_streams_pcm_with_fish_audio(server_module, monkeypatch):
 
     assert calls == [chunks]
     assert "Fish Audio PCM/en" in result
+    assert "segments=?" in result
 
 
 def test_stackchan_say_falls_back_to_wav_when_pcm_streaming_fails(
@@ -257,7 +302,7 @@ def test_stackchan_say_falls_back_to_wav_when_pcm_streaming_fails(
     result = server_module.stackchan_say("hello", "zh")
 
     assert played_urls == ["http://192.0.2.10:5099/fallback.wav"]
-    assert "Fish Audio/zh" in result
+    assert "Fish Audio WAV/zh" in result
     assert "PCM fallback" in result
     assert "Falling back to WAV TTS after PCM failure: pcm failed" in caplog.text
 
@@ -278,7 +323,7 @@ def test_stackchan_say_falls_back_to_wav_when_pcm_play_is_unsuccessful(
 
     result = server_module.stackchan_say("hello", "zh")
 
-    assert "Fish Audio/zh" in result
+    assert "Fish Audio WAV/zh" in result
     assert "PCM fallback" in result
     assert "PCM play returned {'success': False}" in caplog.text
 
@@ -306,6 +351,67 @@ def test_stackchan_say_does_not_fallback_after_pcm_audio_started(server_module, 
     assert "PCM playback failed after audio started" in result
 
 
+def test_stackchan_say_wav_mode_skips_pcm(server_module, monkeypatch, tmp_path):
+    wav_path = tmp_path / "speech.wav"
+    write_wav(wav_path)
+    played_urls = []
+
+    monkeypatch.setattr(server_module, "STACKCHAN_AUDIO_MODE", "wav")
+    monkeypatch.setattr(server_module, "TTS_ENGINE", "fish-audio")
+    monkeypatch.setattr(server_module, "FISH_AUDIO_KEY", "test-key")
+    monkeypatch.setattr(server_module, "start_audio_server", lambda: None)
+    monkeypatch.setattr(server_module, "generate_tts", lambda _text, _lang: wav_path)
+    monkeypatch.setattr(server_module, "stackchan_play", lambda url: played_urls.append(url) or {"success": True})
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("PCM should not be used in wav mode")
+
+    monkeypatch.setattr(server_module, "stackchan_play_pcm", fail_if_called)
+    monkeypatch.setattr(server_module, "iter_fish_pcm_stream", fail_if_called)
+
+    result = server_module.stackchan_say("hello", "zh")
+
+    assert played_urls == [server_module.audio_url(wav_path.name)]
+    assert "Fish Audio WAV/zh mode=wav" in result
+
+
+def test_stackchan_say_forced_pcm_does_not_fallback(server_module, monkeypatch, tmp_path):
+    wav_path = tmp_path / "fallback.wav"
+    write_wav(wav_path)
+
+    monkeypatch.setattr(server_module, "STACKCHAN_AUDIO_MODE", "pcm")
+    monkeypatch.setattr(server_module, "TTS_ENGINE", "fish-audio")
+    monkeypatch.setattr(server_module, "FISH_AUDIO_KEY", "test-key")
+    monkeypatch.setattr(server_module, "start_audio_server", lambda: None)
+    monkeypatch.setattr(server_module, "iter_fish_pcm_stream", lambda text, lang: iter([b"\x00\x00"]))
+    monkeypatch.setattr(
+        server_module,
+        "stackchan_play_pcm",
+        lambda _pcm_chunks: (_ for _ in ()).throw(RuntimeError("pcm failed")),
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("WAV fallback should not run in forced PCM mode")
+
+    monkeypatch.setattr(server_module, "generate_tts", fail_if_called)
+    monkeypatch.setattr(server_module, "stackchan_play", fail_if_called)
+
+    result = server_module.stackchan_say("hello", "zh")
+
+    assert "PCM playback failed: pcm failed" in result
+
+
+def test_stackchan_say_forced_pcm_requires_fish_credentials(server_module, monkeypatch):
+    monkeypatch.setattr(server_module, "STACKCHAN_AUDIO_MODE", "pcm")
+    monkeypatch.setattr(server_module, "TTS_ENGINE", "edge-tts")
+    monkeypatch.setattr(server_module, "FISH_AUDIO_KEY", "")
+    monkeypatch.setattr(server_module, "start_audio_server", lambda: None)
+
+    result = server_module.stackchan_say("hello", "zh")
+
+    assert "PCM playback unavailable" in result
+
+
 def test_stackchan_play_pcm_posts_binary_payload_with_content_length(server_module, monkeypatch):
     request_kwargs = {}
 
@@ -323,10 +429,14 @@ def test_stackchan_play_pcm_posts_binary_payload_with_content_length(server_modu
 
     monkeypatch.setattr(server_module.requests, "post", fake_post)
 
-    result = server_module.stackchan_play_pcm(iter([b"\x01\x00", b"\x02\x00"]))
+    result = server_module.stackchan_play_pcm(
+        iter([struct.pack("<h", 1000), struct.pack("<h", -1000)])
+    )
 
-    assert result == {"success": True}
-    assert request_kwargs["kwargs"]["data"] == b"\x01\x00\x02\x00"
+    assert result["success"] is True
+    assert result["segments"] == 1
+    assert result["total_bytes"] == 4
+    assert request_kwargs["kwargs"]["data"] == struct.pack("<hh", 750, -750)
     assert isinstance(request_kwargs["kwargs"]["data"], bytes)
     assert request_kwargs["kwargs"]["headers"]["Content-Type"].startswith("audio/x-raw")
     assert "final=1" in request_kwargs["args"][0]
@@ -367,10 +477,15 @@ def test_stackchan_play_pcm_posts_large_payload_in_segments(server_module, monke
 
     result = server_module.stackchan_play_pcm(iter([b"\x00\x00" * ((segment_size // 2) + 4)]))
 
-    assert result == {"success": True}
+    assert result["success"] is True
+    assert result["segments"] == 2
+    assert result["total_bytes"] == segment_size + 8
+    assert result["declicked_samples"] == server_module.PCM_DECLICK_SAMPLES
     assert len(posted) == 2
-    assert len(posted[0]) == segment_size
-    assert posted[1] == b"\x00\x00" * 4
+    assert len(posted[0]) == segment_size - (
+        server_module.PCM_ZERO_CROSS_WINDOW * server_module.PCM_SAMPLE_WIDTH
+    )
+    assert len(posted[1]) == (server_module.PCM_ZERO_CROSS_WINDOW * server_module.PCM_SAMPLE_WIDTH) + 8
     assert "final=0" in urls[0]
     assert "final=1" in urls[1]
 
@@ -405,6 +520,59 @@ def test_stackchan_play_pcm_marks_late_invalid_payload_as_started(server_module,
         server_module.stackchan_play_pcm(iter([segment, segment, b"\x01"]))
 
     assert excinfo.value.started is True
+
+
+def test_stackchan_play_pcm_saves_diagnostic_pcm(server_module, monkeypatch, tmp_path):
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": True}
+
+    monkeypatch.setattr(server_module, "AUDIO_DIR", audio_dir)
+    monkeypatch.setattr(server_module, "STACKCHAN_SAVE_PCM", True)
+    monkeypatch.setattr(server_module.requests, "post", lambda *_args, **_kwargs: FakeResponse())
+
+    result = server_module.stackchan_play_pcm(iter([b"\x01\x00", b"\x02\x00"]))
+
+    saved_path = Path(result["saved_pcm"])
+    assert saved_path.parent == audio_dir
+    assert saved_path.read_bytes() == b"\x01\x00\x02\x00"
+
+
+def test_condition_pcm_chunk_applies_gain_and_limit(server_module, monkeypatch):
+    monkeypatch.setattr(server_module, "PCM_GAIN", 1.0)
+    monkeypatch.setattr(server_module, "PCM_LIMIT", 0.5)
+    chunk = struct.pack("<hhhh", 10000, -10000, 32767, -32768)
+
+    conditioned, limited = server_module.condition_pcm_chunk(chunk)
+
+    assert struct.unpack("<hhhh", conditioned) == (10000, -10000, 16383, -16383)
+    assert limited == 2
+
+
+def test_declick_pcm_segment_smooths_segment_start(server_module, monkeypatch):
+    monkeypatch.setattr(server_module, "PCM_DECLICK_SAMPLES", 2)
+    segment = struct.pack("<hhh", 3000, 3000, 3000)
+
+    declicked, changed = server_module.declick_pcm_segment(segment, -3000)
+
+    assert struct.unpack("<hhh", declicked) == (-1000, 1000, 3000)
+    assert changed == 2
+
+
+def test_choose_pcm_segment_cut_prefers_zero_crossing(server_module, monkeypatch):
+    monkeypatch.setattr(server_module, "PCM_ZERO_CROSS_WINDOW", 4)
+    samples = [1000, 800, 400, -20, 20, 900, 1000]
+    buffer = bytearray(struct.pack("<" + "h" * len(samples), *samples))
+
+    cut = server_module.choose_pcm_segment_cut(buffer, 6 * server_module.PCM_SAMPLE_WIDTH)
+
+    assert cut == 3 * server_module.PCM_SAMPLE_WIDTH
 
 
 @pytest.mark.parametrize("pcm_chunks", [[], [b""], [b"\x00"]])

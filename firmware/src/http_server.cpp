@@ -9,6 +9,7 @@
 #include "camera_service.h"
 #include "face_service.h"
 #include "playback_service.h"
+#include "mic_service.h"
 
 static WebServer server(80);
 
@@ -22,8 +23,10 @@ static size_t   s_pcm_upload_size = 0;
 static size_t   s_pcm_upload_capacity = 0;
 static bool     s_pcm_upload_ready = false;
 static const char* s_pcm_upload_error = nullptr;
+static String   s_pcm_diag_session = "";
+static long     s_pcm_diag_next_seq = 0;
 
-#define HTTP_PCM_MAX_BYTES (2 * 1024 * 1024)
+#define HTTP_PCM_MAX_BYTES (128 * 1024)
 
 // ── モードフラグ（false=APIモード / true=MCPモード）
 static bool s_mcp_mode = false;
@@ -121,6 +124,8 @@ static void handlePlayPcm() {
 
     const size_t pcmSize = s_pcm_upload_size;
     String sessionId = server.arg("session");
+    String seqArg = server.arg("seq");
+    long seq = seqArg.length() ? seqArg.toInt() : -1;
     bool finalSegment = server.arg("final") == "1" || server.arg("final") == "true";
     uint8_t* pcmData = s_pcm_upload_buf;
     s_pcm_upload_buf = nullptr;
@@ -128,9 +133,32 @@ static void handlePlayPcm() {
     s_pcm_upload_capacity = 0;
     s_pcm_upload_ready = false;
 
+    long expectedSeq = s_pcm_diag_next_seq;
+    bool newDiagSession = sessionId != s_pcm_diag_session;
+    if (newDiagSession) {
+        expectedSeq = 0;
+    }
+    bool seqValid = true;
+    if (seq < 0 || seq != expectedSeq) {
+        Serial.printf("[HTTP] PCM seq invalid: session=%s got=%ld expected=%ld\n",
+                      sessionId.c_str(), seq, expectedSeq);
+        seqValid = false;
+    }
+
+    if (!seqValid) {
+        free(pcmData);
+        clearQueuedPcmPlayback();
+        server.send(409, "application/json", "{\"success\":false,\"error\":\"pcm seq invalid\"}");
+        return;
+    }
     PcmPlaybackResult result = startPcmPlayback(pcmData, pcmSize, sessionId, finalSegment);
     if (result != PCM_PLAYBACK_OK && result != PCM_PLAYBACK_QUEUED) {
-        free(pcmData);
+        if (result != PCM_PLAYBACK_SPEAKER_FAILED) {
+            free(pcmData);
+        }
+        Serial.printf("[HTTP] POST /play/pcm failed -> session=%s seq=%ld bytes=%u final=%s result=%d\n",
+                      sessionId.c_str(), seq, (unsigned)pcmSize,
+                      finalSegment ? "true" : "false", result);
         if (result == PCM_PLAYBACK_BUSY) {
             server.send(409, "application/json", "{\"success\":false,\"error\":\"playback busy\"}");
         } else if (result == PCM_PLAYBACK_SESSION_MISMATCH) {
@@ -143,9 +171,16 @@ static void handlePlayPcm() {
         return;
     }
 
-    Serial.printf("[HTTP] POST /play/pcm -> session=%s bytes=%u final=%s result=%d\n",
-                  sessionId.c_str(), (unsigned)pcmSize,
-                  finalSegment ? "true" : "false", result);
+    if (newDiagSession) {
+        s_pcm_diag_session = sessionId;
+        Serial.printf("[HTTP] PCM diag new session=%s\n", sessionId.c_str());
+    }
+    s_pcm_diag_next_seq = seq + 1;
+
+    Serial.printf("[HTTP] POST /play/pcm -> session=%s seq=%ld bytes=%u final=%s result=%d queued=%s\n",
+                  sessionId.c_str(), seq, (unsigned)pcmSize,
+                  finalSegment ? "true" : "false", result,
+                  result == PCM_PLAYBACK_QUEUED ? "true" : "false");
     if (result == PCM_PLAYBACK_QUEUED) {
         server.send(202, "application/json", "{\"success\":true,\"queued\":true,\"format\":\"s16le\",\"sample_rate\":24000,\"channels\":1}");
     } else {
@@ -358,11 +393,45 @@ static void handleServoStatus() {
     doc["last_yaw_result"] = status.lastYawResult;
     doc["last_pitch_result"] = status.lastPitchResult;
     doc["last_command_ms"] = status.lastCommandMs;
+    doc["gesture_active"] = status.gestureActive;
+    doc["gesture"] = status.gestureName;
 
     JsonObject yaw = doc["yaw"].to<JsonObject>();
     JsonObject pitch = doc["pitch"].to<JsonObject>();
     addFeedback(yaw, status.yaw);
     addFeedback(pitch, status.pitch);
+
+    String body;
+    serializeJson(doc, body);
+    server.send(200, "application/json", body);
+}
+
+// ────────────────────────────────────────────
+// GET /playback/status
+// → Combined runtime diagnostics for playback, microphone, queues, and memory
+// ────────────────────────────────────────────
+static void handlePlaybackStatus() {
+    PlaybackStatus playback = getPlaybackStatus();
+    ServoStatus servo = getServoStatus();
+
+    JsonDocument doc;
+    doc["playing"] = playback.playing;
+    doc["kind"] = playback.pcm ? "pcm" : (playback.playing ? "wav" : "idle");
+    doc["pcm_session"] = playback.pcmSession;
+    doc["pcm_final_segment"] = playback.pcmFinalSegment;
+    doc["current_bytes"] = playback.currentBytes;
+    doc["queued_pcm_bytes"] = playback.queuedPcmBytes;
+    doc["queued_pcm_segments"] = playback.queuedPcmSegments;
+    doc["audio_queue_depth"] = audioQueue.size();
+    doc["started_ms"] = playback.startedMs;
+    doc["deadline_ms"] = playback.deadlineMs;
+    doc["mic_state"] = getMicStateName();
+    doc["mic_resume_requested"] = micResumeRequested;
+    doc["servo_ready"] = servo.ready;
+    doc["gesture_active"] = servo.gestureActive;
+    doc["gesture"] = servo.gestureName;
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["free_psram"] = ESP.getFreePsram();
 
     String body;
     serializeJson(doc, body);
@@ -465,6 +534,7 @@ void initHttpServer() {
     server.on("/nod",          HTTP_POST, handleNod);
     server.on("/shake",        HTTP_POST, handleShake);
     server.on("/servo/status", HTTP_GET,  handleServoStatus);
+    server.on("/playback/status", HTTP_GET, handlePlaybackStatus);
     server.on("/snapshot",     HTTP_GET,  handleSnapshot);
     server.on("/face",         HTTP_POST, handleFace);
     server.on("/face",         HTTP_GET,  handleFace);

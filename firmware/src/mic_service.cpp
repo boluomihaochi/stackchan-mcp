@@ -50,6 +50,13 @@ static size_t  pre_buf_write = 0;
 static bool    pre_buf_full  = false;
 static unsigned long micResumedAtMs = 0;
 
+struct SpeechUpload {
+    uint8_t* wav;
+    size_t size;
+};
+
+static QueueHandle_t speechQueue = nullptr;
+
 static inline float calcRmsNorm(const int16_t* data, size_t n) {
     if (n == 0) return 0.0f;
     float sum = 0.0f; 
@@ -61,6 +68,30 @@ static inline float calcRmsNorm(const int16_t* data, size_t n) {
 }
 
 static bool sendAudioToServer(int16_t* audio_data, size_t sample_count);
+static bool processSpeechUpload(uint8_t* wav, size_t wav_size);
+
+static void speechWorkerTask(void* arg) {
+    SpeechUpload upload;
+    for (;;) {
+        if (xQueueReceive(speechQueue, &upload, portMAX_DELAY) != pdTRUE) continue;
+        bool ok = processSpeechUpload(upload.wav, upload.size);
+        free(upload.wav);
+        Serial.printf("[MIC] Async STT/chat result=%s\n", ok ? "OK" : "NG");
+        if (!ok) {
+            setFaceExpression(FACE_IDLE);
+        }
+    }
+}
+
+const char* getMicStateName() {
+    switch (mic_state) {
+        case MIC_IDLE: return "idle";
+        case MIC_TRIGGERING: return "triggering";
+        case MIC_RECORDING: return "recording";
+        case MIC_SENDING: return "sending";
+        default: return "unknown";
+    }
+}
 
 static bool isValidAudio(int16_t* audio_data, size_t sample_count) {
     if (sample_count < MIC_MIN_VALID_SAMPLES) {
@@ -122,6 +153,24 @@ bool initMicrophone() {
     if (!M5.Mic.begin()) {
         Serial.println("[MIC] Mic.begin failed");
         return false;
+    }
+
+    if (!speechQueue) {
+        speechQueue = xQueueCreate(2, sizeof(SpeechUpload));
+        if (!speechQueue) {
+            Serial.println("[MIC] Failed to create speech queue");
+            return false;
+        }
+        xTaskCreatePinnedToCore(
+            speechWorkerTask,
+            "speechWorker",
+            8192,
+            nullptr,
+            1,
+            nullptr,
+            1
+        );
+        Serial.println("[MIC] Speech worker started");
     }
     
     // 初回のみ確保（再開時はスキップ）
@@ -256,13 +305,35 @@ static bool sendAudioToServer(int16_t* audio_data, size_t sample_count) {
         return true;
     }
 
+    if (!speechQueue) {
+        Serial.println("[MIC] Speech queue not initialized");
+        free(wav);
+        return false;
+    }
+
+    SpeechUpload upload = {wav, wav_size};
+    if (xQueueSend(speechQueue, &upload, 0) != pdTRUE) {
+        Serial.println("[MIC] Speech queue full");
+        free(wav);
+        return false;
+    }
+
+    Serial.println("[MIC] Queued async STT/chat upload");
+    return true;
+}
+
+static bool processSpeechUpload(uint8_t* wav, size_t wav_size) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[MIC] WiFi disconnected before async STT");
+        return false;
+    }
+
     HTTPClient http;
     http.begin(serverUrl + "/speech/transcribe");
     http.addHeader("Content-Type", "audio/wav");
     http.setTimeout(HTTP_TIMEOUT_STT);
 
     int code = http.sendRequest("POST", wav, wav_size);
-    free(wav);
 
     if (code != HTTP_CODE_OK) {
         Serial.printf("[MIC] /speech/transcribe HTTP=%d body=%s\n",

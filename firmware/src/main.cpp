@@ -58,12 +58,8 @@ void setup() {
 void loop() {
     M5StackChan.update();
     handleHttpServer();
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WIFI] Disconnected. Reconnecting...");
-        WiFi.reconnect();
-        delay(5000);
-    }
+    serviceWiFi();
+    updateServoGesture();
 
     checkPendingPlayback();
     updateLipSync();

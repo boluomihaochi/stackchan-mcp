@@ -18,6 +18,8 @@ static const NetworkConfig NETWORKS[WIFI_NETWORK_COUNT] = {
     { WIFI_SSID_1, WIFI_PASSWORD_1, SERVER_URL_1 },
 };
 
+#define WIFI_RECONNECT_INTERVAL_MS 5000
+
 void connectWiFi() {
     Serial.println("\nConnecting to WiFi...");
     WiFi.mode(WIFI_STA);
@@ -52,4 +54,27 @@ void connectWiFi() {
 
     // 全部失敗
     Serial.println("[WIFI] ❌ すべてのネットワークへの接続に失敗しました");
+}
+
+void serviceWiFi() {
+    static unsigned long lastReconnectMs = 0;
+    static bool wasConnected = false;
+
+    if (WiFi.status() == WL_CONNECTED) {
+        if (!wasConnected) {
+            Serial.printf("[WIFI] Connected: %s\n", WiFi.localIP().toString().c_str());
+        }
+        wasConnected = true;
+        return;
+    }
+
+    wasConnected = false;
+    unsigned long now = millis();
+    if (now - lastReconnectMs < WIFI_RECONNECT_INTERVAL_MS) {
+        return;
+    }
+    lastReconnectMs = now;
+
+    Serial.println("[WIFI] Disconnected. Reconnect requested.");
+    WiFi.reconnect();
 }

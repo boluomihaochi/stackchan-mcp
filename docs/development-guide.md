@@ -166,12 +166,17 @@ The firmware exposes an HTTP API on port 80.
 | `POST` | `/nod` | Nod gesture | Servo must be ready |
 | `POST` | `/shake` | Shake gesture | Servo must be ready |
 | `GET` | `/servo/status` | Servo diagnostics | Includes last command and feedback |
+| `GET` | `/playback/status` | Runtime diagnostics | Playback, PCM queues, mic state, gesture, heap, and PSRAM |
 | `POST` | `/face` | Set face expression | Body: `{"face":"calm"}` |
 | `GET` | `/face` | Read current face expression | Returns current face name |
 | `GET` | `/snapshot` | Capture camera image | Returns 320x240 JPEG |
 
 Supported face names are `calm`, `thinking`, `happy`, `sleepy`, `shy`, `smug`,
 and `pouty`.
+
+Servo gestures are non-blocking. `/nod` and `/shake` start a stepper that is
+advanced from `loop()`, and direct `/move` or `/home` commands cancel any active
+gesture before moving.
 
 Be careful with `GET /audio`: it returns the current WAV recording and marks it
 as no longer ready. Use `GET /audio/status` first when checking live devices.
@@ -184,6 +189,7 @@ Set `STACKCHAN_IP` to the current device address before running these:
 curl -sS --max-time 5 "http://$STACKCHAN_IP/audio/status"
 curl -sS --max-time 5 "http://$STACKCHAN_IP/face"
 curl -sS --max-time 5 "http://$STACKCHAN_IP/servo/status"
+curl -sS --max-time 5 "http://$STACKCHAN_IP/playback/status"
 curl -sS --max-time 10 -o /tmp/stackchan_snapshot.jpg "http://$STACKCHAN_IP/snapshot"
 ```
 
@@ -199,7 +205,9 @@ WAV playback is push-based:
 3. The firmware enqueues an `AudioTask`.
 4. `playback_service.cpp` downloads audio on a FreeRTOS task so the main loop
    stays responsive.
-5. The main loop starts speaker playback after the download is ready.
+5. The download task passes completed WAV buffers back to the main loop through
+   a FreeRTOS queue; the main loop starts speaker playback only when no audio is
+   already playing.
 6. Lip sync reads PCM amplitude from the WAV data and toggles mouth state.
 7. Playback completion stops the speaker path and allows microphone resume.
 
@@ -214,10 +222,23 @@ For lower latency speech, firmware also accepts `POST /play/pcm` with raw PCM:
   `202 Accepted` while the current PCM segment is playing.
 - Each PCM segment includes `session`, `seq`, and `final` query parameters.
   Firmware only queues segments for the active PCM session and logs the session
-  id, segment size, final flag, and queued byte count.
+  id, segment size, final flag, and queued byte count. Missing, repeated, or
+  skipped `seq` values are rejected and queued PCM is cleared. The expected
+  sequence number advances only after the segment is accepted by playback
+  service.
 - The firmware stops the microphone, starts speaker playback with
   `M5.Speaker.playRaw()`, computes lip sync from PCM amplitude, and queues
   subsequent PCM segments while the current PCM segment is playing.
+- Playback buffer ownership stays in `playback_service.cpp`. Finished buffers
+  are retired for one additional completion cycle before being freed, so
+  `M5.Speaker.playRaw()` / `playWav()` internals are not handed memory that has
+  just been released.
+- The main loop never blocks for Wi-Fi reconnect. `serviceWiFi()` requests
+  reconnects at intervals while HTTP, playback, and microphone services keep
+  running.
+- After recording in API mode, the microphone service queues the generated WAV
+  to a speech worker task. STT and chat HTTP calls no longer run directly in the
+  main loop.
 - Playback timeout clears any queued PCM segments before resuming normal audio
   queue processing, so stale segments from a broken stream are not replayed.
 - The MCP server posts Fish PCM in bounded segments so playback can start
@@ -229,6 +250,14 @@ For lower latency speech, firmware also accepts `POST /play/pcm` with raw PCM:
   fails before any PCM segment is accepted, it falls back to the existing WAV
   `/play` path. If a later PCM segment fails after audio has started, MCP
   returns an error instead of falling back to WAV to avoid duplicate speech.
+- Set `STACKCHAN_AUDIO_MODE=wav` to force the validated WAV path, `pcm` to
+  force PCM without fallback, or `auto` for the default behavior. Set
+  `STACKCHAN_SAVE_PCM=1` to save streamed Fish PCM as
+  `/tmp/stackchan_audio/diag_<session>.pcm` for offline inspection. PCM
+  streaming applies conservative gain/peak limiting before sending to the
+  device; tune with `STACKCHAN_PCM_GAIN` and `STACKCHAN_PCM_LIMIT`. It also
+  chooses segment boundaries near low-amplitude samples and smooths a short
+  ramp at PCM segment boundaries to reduce clicks from `playRaw()` transitions.
 
 Safe playback smoke tests:
 
@@ -249,6 +278,34 @@ spec = importlib.util.spec_from_file_location(
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 print(server.stackchan_say("Stack-chan playback test.", "en"))
+PY
+
+# Force WAV for crackle/noise isolation.
+STACKCHAN_AUDIO_MODE=wav MAC_IP="$MAC_IP" STACKCHAN_IP="$STACKCHAN_IP" \
+  uv run python - <<'PY'
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location(
+    "stackchan_mcp_server", Path("mcp-server/server.py")
+)
+server = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server)
+print(server.stackchan_say("Stack-chan WAV playback test.", "en"))
+PY
+
+# Force PCM and save the exact Fish PCM stream for diagnosis.
+STACKCHAN_AUDIO_MODE=pcm STACKCHAN_SAVE_PCM=1 MAC_IP="$MAC_IP" STACKCHAN_IP="$STACKCHAN_IP" \
+  uv run python - <<'PY'
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location(
+    "stackchan_mcp_server", Path("mcp-server/server.py")
+)
+server = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server)
+print(server.stackchan_say("Stack-chan PCM playback test.", "en"))
 PY
 ```
 
@@ -290,6 +347,7 @@ curl -sS -X POST "http://$STACKCHAN_IP/mode" \
 - `stackchan_face(expression="calm")`
 - `stackchan_see()`
 - `stackchan_status()`
+- `stackchan_playback_status()`
 
 Important environment variables:
 
@@ -300,8 +358,25 @@ Important environment variables:
 - `TTS_ENGINE`: `fish-audio` or `edge-tts`.
 - `FISH_AUDIO_KEY`: required for Fish Audio TTS/ASR.
 - `EDGE_TTS_BIN`: path to `edge-tts` when using the edge TTS fallback.
+- `STACKCHAN_AUDIO_MODE`: `auto`, `pcm`, or `wav`; useful for isolating PCM
+  streaming noise from WAV playback behavior.
+- `STACKCHAN_SAVE_PCM`: set to `1` to save streamed PCM diagnostic files.
+- `STACKCHAN_PCM_GAIN`: PCM streaming gain before playback, default `0.75`.
+- `STACKCHAN_PCM_LIMIT`: PCM streaming peak limit as full-scale ratio, default
+  `0.90`.
+- `STACKCHAN_PCM_DECLICK_SAMPLES`: samples smoothed at each PCM segment
+  boundary, default `64`.
+- `STACKCHAN_PCM_ZERO_CROSS_WINDOW`: samples searched before the target segment
+  boundary for a quieter cut point, default `256`.
+  Invalid PCM tuning values are ignored with a warning and replaced by these
+  documented defaults.
 
 The server writes generated and captured media under `/tmp/stackchan_audio`.
+
+`stackchan_playback_status()` calls firmware `GET /playback/status` and is the
+preferred live diagnostic for playback bugs because it does not consume
+recordings and reports queue depth, PCM state, microphone state, gesture state,
+heap, and PSRAM.
 
 Run in stdio mode:
 
@@ -323,7 +398,10 @@ Or use:
 ```
 
 `start-http.sh` starts the MCP server on port `8002`, starts `cloudflared tunnel
-run` if needed, and checks the public MCP endpoint.
+run` if needed, and checks the public MCP endpoint. It reads optional overrides
+from project-root `.env`: `STACKCHAN_PORT`, `MCP_PYTHON`, `MCP_SCRIPT`,
+`STACKCHAN_PUBLIC_MCP_URL`, and `STACKCHAN_LOG_DIR`. If `MCP_PYTHON` is unset it
+uses `uv run python`, which avoids hard-coding a personal virtualenv path.
 
 Run the MCP-only regression tests without a device:
 

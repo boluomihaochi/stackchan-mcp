@@ -15,6 +15,16 @@ static int lastPitchAngle = 0;
 static int lastSpeed = 0;
 static unsigned long lastCommandMs = 0;
 
+enum GestureKind {
+    GESTURE_NONE = 0,
+    GESTURE_NOD,
+    GESTURE_SHAKE,
+};
+
+static GestureKind activeGesture = GESTURE_NONE;
+static uint8_t gestureStep = 0;
+static unsigned long nextGestureStepMs = 0;
+
 bool isServoReady() { return servoReady; }
 
 static float clampf(float v, float lo, float hi) {
@@ -41,6 +51,28 @@ static void noteCommand(int yawAngle, int pitchAngle, int speed) {
     lastCommandMs = millis();
 }
 
+static const char* gestureName() {
+    switch (activeGesture) {
+        case GESTURE_NOD: return "nod";
+        case GESTURE_SHAKE: return "shake";
+        default: return "none";
+    }
+}
+
+static bool startGesture(GestureKind gesture) {
+    if (!servoReady || activeGesture != GESTURE_NONE) return false;
+    activeGesture = gesture;
+    gestureStep = 0;
+    nextGestureStepMs = 0;
+    return true;
+}
+
+static void cancelGesture() {
+    activeGesture = GESTURE_NONE;
+    gestureStep = 0;
+    nextGestureStepMs = 0;
+}
+
 bool initServo() {
     // M5StackChan.begin() performs the official hardware initialization,
     // including servo VM_EN power control through the IO expander.
@@ -55,6 +87,7 @@ bool initServo() {
 
 bool servoMove(float yawDeg, float pitchDeg, int speedPct) {
     if (!servoReady) return false;
+    cancelGesture();
 
     yawDeg = clampf(yawDeg, YAW_MIN_DEG, YAW_MAX_DEG);
     pitchDeg = clampf(pitchDeg, PITCH_MIN_DEG, PITCH_MAX_DEG);
@@ -73,6 +106,7 @@ bool servoMove(float yawDeg, float pitchDeg, int speedPct) {
 
 bool servoHome(int speedPct) {
     if (!servoReady) return false;
+    cancelGesture();
     int speed = speedToBspSpeed(speedPct);
     M5StackChan.Motion.goHome(speed);
     noteCommand(0, 0, speed);
@@ -81,31 +115,67 @@ bool servoHome(int speedPct) {
 }
 
 bool servoNod() {
-    if (!servoReady) return false;
+    if (!startGesture(GESTURE_NOD)) return false;
     Serial.println("[SERVO] Nod");
-    M5StackChan.Motion.moveY(300, 500);
-    delay(350);
-    M5StackChan.Motion.moveY(50, 600);
-    delay(350);
-    M5StackChan.Motion.moveY(300, 500);
-    delay(350);
-    M5StackChan.Motion.goHome(500);
-    noteCommand(0, 0, 500);
     return true;
 }
 
 bool servoShake() {
-    if (!servoReady) return false;
+    if (!startGesture(GESTURE_SHAKE)) return false;
     Serial.println("[SERVO] Shake");
-    M5StackChan.Motion.moveX(-400, 600);
-    delay(300);
-    M5StackChan.Motion.moveX(400, 600);
-    delay(300);
-    M5StackChan.Motion.moveX(-400, 600);
-    delay(300);
-    M5StackChan.Motion.goHome(500);
-    noteCommand(0, 0, 500);
     return true;
+}
+
+void updateServoGesture() {
+    if (!servoReady || activeGesture == GESTURE_NONE) return;
+
+    unsigned long now = millis();
+    if (nextGestureStepMs != 0 && now < nextGestureStepMs) return;
+
+    if (activeGesture == GESTURE_NOD) {
+        switch (gestureStep) {
+            case 0:
+                M5StackChan.Motion.moveY(300, 500);
+                nextGestureStepMs = now + 350;
+                break;
+            case 1:
+                M5StackChan.Motion.moveY(50, 600);
+                nextGestureStepMs = now + 350;
+                break;
+            case 2:
+                M5StackChan.Motion.moveY(300, 500);
+                nextGestureStepMs = now + 350;
+                break;
+            case 3:
+                M5StackChan.Motion.goHome(500);
+                noteCommand(0, 0, 500);
+                activeGesture = GESTURE_NONE;
+                nextGestureStepMs = 0;
+                break;
+        }
+    } else if (activeGesture == GESTURE_SHAKE) {
+        switch (gestureStep) {
+            case 0:
+                M5StackChan.Motion.moveX(-400, 600);
+                nextGestureStepMs = now + 300;
+                break;
+            case 1:
+                M5StackChan.Motion.moveX(400, 600);
+                nextGestureStepMs = now + 300;
+                break;
+            case 2:
+                M5StackChan.Motion.moveX(-400, 600);
+                nextGestureStepMs = now + 300;
+                break;
+            case 3:
+                M5StackChan.Motion.goHome(500);
+                noteCommand(0, 0, 500);
+                activeGesture = GESTURE_NONE;
+                nextGestureStepMs = 0;
+                break;
+        }
+    }
+    gestureStep++;
 }
 
 ServoStatus getServoStatus() {
@@ -117,6 +187,8 @@ ServoStatus getServoStatus() {
     status.lastYawResult = 1;
     status.lastPitchResult = 1;
     status.lastCommandMs = lastCommandMs;
+    status.gestureActive = activeGesture != GESTURE_NONE;
+    status.gestureName = gestureName();
 
     if (servoReady) {
         status.yaw.ok = true;

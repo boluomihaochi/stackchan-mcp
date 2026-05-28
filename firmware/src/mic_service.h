@@ -3,3 +3,4 @@
 
 bool initMicrophone();
 void updateMicrophone();  
+const char* getMicStateName();

@@ -29,6 +29,8 @@ struct ServoStatus {
     int lastYawResult = 0;
     int lastPitchResult = 0;
     unsigned long lastCommandMs = 0;
+    bool gestureActive = false;
+    const char* gestureName = "none";
     ServoFeedback yaw;
     ServoFeedback pitch;
 };
@@ -53,6 +55,9 @@ bool servoNod();
 
 // Shake "no" gesture
 bool servoShake();
+
+// Advance any active non-blocking gesture. Call from loop().
+void updateServoGesture();
 
 // Read current servo feedback for diagnostics
 ServoStatus getServoStatus();

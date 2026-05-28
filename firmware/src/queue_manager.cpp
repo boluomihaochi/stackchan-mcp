@@ -17,11 +17,7 @@ void enqueueAudioTask(const AudioTask& task) {
 
 void notifyPlaybackFinished() {
     isPlaying = false;
-    if (currentWavData) {
-        free(currentWavData);
-        currentWavData = nullptr;
-        currentWavSize = 0;
-    }
+    retireCurrentPlaybackBuffer();
     setMouthOpen(0.0f);
     processAudioQueue();  
 

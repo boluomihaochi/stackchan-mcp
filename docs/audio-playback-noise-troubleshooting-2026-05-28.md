@@ -150,3 +150,73 @@ serial behavior is a WAV validation error and no speaker playback.
 - If crackle returns after this fix, capture serial logs around
   `[DOWNLOAD] Complete` and `[PLAY] Speaker started`, then compare the logged
   byte counts against the served file size on the host.
+
+## 2026-05-29 Follow-up: MCP PCM Streaming Noise
+
+After the WAV download fix, crackling still occurred during normal MCP speech.
+That path now uses Fish Audio PCM streaming by default, so the follow-up work
+focused on the `/play/pcm` route rather than the WAV `/play` route.
+
+Additional mitigations now in place:
+
+- `STACKCHAN_AUDIO_MODE=auto|pcm|wav` can force PCM or WAV for isolation.
+- `STACKCHAN_SAVE_PCM=1` saves the original Fish PCM stream under
+  `/tmp/stackchan_audio/diag_<session>.pcm`.
+- PCM streaming applies host-side gain and limiting before device playback:
+  `STACKCHAN_PCM_GAIN` defaults to `0.75`, and `STACKCHAN_PCM_LIMIT` defaults
+  to `0.90`.
+- PCM segments are cut near a low-amplitude sample when possible
+  (`STACKCHAN_PCM_ZERO_CROSS_WINDOW`, default `256`) and get a short de-click
+  ramp at the next segment start (`STACKCHAN_PCM_DECLICK_SAMPLES`, default
+  `64`).
+- Firmware logs `/play/pcm` session, `seq`, byte count, final flag, queue
+  result, and sequence gaps. Invalid `seq` values are rejected instead of being
+  played.
+- Firmware limits each `/play/pcm` request body to 128 KiB. Normal MCP segments
+  are about 48 KiB, so oversized bodies are treated as malformed input rather
+  than consuming large PSRAM buffers.
+- Firmware retains the most recently finished playback buffer for one more
+  completion cycle before freeing it, reducing the risk of freeing memory while
+  `M5.Speaker.playRaw()` internals still reference it.
+- Firmware now passes completed WAV downloads from the download task to the
+  main loop with a FreeRTOS queue instead of a `volatile` flag plus shared
+  pointers. The main loop refuses to start a downloaded WAV while another
+  playback is active, so playback buffers are no longer replaced mid-playback.
+- `M5.Speaker.playWav()` return values are checked, and failed speaker starts
+  no longer mark playback as active.
+- Wi-Fi reconnect handling in the main loop is non-blocking, avoiding the
+  previous 5 second stall that could pause HTTP, playback completion, and
+  microphone resume handling.
+- A follow-up ownership audit found that failed `playRaw()` starts could leave
+  the same PCM pointer owned by both `playback_service.cpp` and the HTTP/queue
+  caller. The failure path now frees and clears the current PCM buffer inside
+  playback service, while callers avoid freeing buffers already consumed by a
+  speaker-start failure.
+- PCM `seq` diagnostics now advance only after a segment is accepted by
+  playback service. A new session no longer overwrites the diagnostic session
+  until its first segment has been accepted, so a busy request from another
+  session cannot corrupt the active stream's expected sequence number.
+- Invalid MCP PCM tuning environment values fall back to documented defaults
+  instead of aborting server import.
+
+Recommended isolation sequence:
+
+```sh
+# Check whether the validated WAV path is clean.
+STACKCHAN_AUDIO_MODE=wav ./start-http.sh
+
+# Force PCM, save the original Fish PCM, and capture MCP + serial logs.
+STACKCHAN_AUDIO_MODE=pcm STACKCHAN_SAVE_PCM=1 ./start-http.sh
+
+# If PCM still clips, lower the conditioning values.
+STACKCHAN_PCM_GAIN=0.55 STACKCHAN_PCM_LIMIT=0.80 \
+  STACKCHAN_PCM_DECLICK_SAMPLES=128 ./start-http.sh
+```
+
+To inspect a saved raw PCM file on the host:
+
+```sh
+ffmpeg -f s16le -ar 24000 -ac 1 \
+  -i /tmp/stackchan_audio/diag_<session>.pcm \
+  /tmp/stackchan_audio/diag_<session>.wav
+```
