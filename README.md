@@ -130,6 +130,48 @@ conversation loop is: human speaks to Stack-chan, the bridge writes the
 transcript, the AI reads `stackchan_voice_inbox`, then replies with
 `stackchan_say`.
 
+For a push-style experiment compatible with clients that POST WAV audio, run
+the upload receiver instead. It exposes `POST /voice/upload`, transcribes the
+WAV with Fish Audio, and writes the same local voice inbox:
+
+```bash
+# Local-only receiver.
+./start-voice-upload.sh
+
+# LAN receiver for a Stack-chan firmware/client that can POST audio/wav.
+STACKCHAN_VOICE_UPLOAD_HOST=0.0.0.0 ./start-voice-upload.sh
+
+# Check or stop it.
+./start-voice-upload.sh status
+./start-voice-upload.sh stop
+```
+
+If you want uploaded speech to enter the migratorybird frontend directly, point
+the receiver at agent-host's `/wake` endpoint and specify the target frontend
+session:
+
+```bash
+STACKCHAN_FRONTEND_SESSION_ID="<frontend-session-uuid>" \
+STACKCHAN_FRONTEND_WAKE_URL="http://127.0.0.1:3200/wake" \
+STACKCHAN_FRONTEND_RETRIES=5 \
+STACKCHAN_FRONTEND_RETRY_DELAY=3 \
+STACKCHAN_VOICE_WAKE_WORDS="小克,小可,老公,脑公" \
+STACKCHAN_VOICE_UPLOAD_HOST=0.0.0.0 \
+./start-voice-upload.sh
+```
+
+Without `STACKCHAN_FRONTEND_SESSION_ID`, the receiver only records transcripts
+to the voice inbox and never guesses which room should receive them.
+`STACKCHAN_FRONTEND_RETRIES` is useful when the target frontend session is
+currently generating and agent-host returns `409 busy`.
+`start-voice-upload.sh` will read `AGENT_HOST_TOKEN` from
+`/Users/Isa/Projects/migratorybird-astro/relay/.env` when
+`STACKCHAN_FRONTEND_TOKEN` is not already set, so you do not need to duplicate
+the frontend token in this repo.
+When `STACKCHAN_VOICE_WAKE_WORDS` is set, only transcripts that start with one
+of those activation names are forwarded to the frontend. Other transcripts are
+still written to the inbox for debugging, but they do not interrupt the session.
+
 ## Faces
 
 Stack-chan has 7 expressions stored as 320x240 PNGs on the device's LittleFS. The default face is a gentle whale with crescent eyes.

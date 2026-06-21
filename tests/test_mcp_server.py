@@ -15,6 +15,7 @@ from mcp_server.mcp_tools import can_stream_pcm, register_tools
 from mcp_server.stackchan_client import PcmPlaybackError, StackchanClient, post_pcm_stream
 from mcp_server.stackchan_config import PCM_SAMPLE_WIDTH, StackchanConfig, load_config
 from mcp_server.voice_inbox import append_event, clear_events, format_events, read_events
+from scripts import stackchan_voice_upload_server
 from scripts.stackchan_voice_bridge import load_env_file, should_append_to_inbox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +154,174 @@ def test_voice_bridge_only_appends_non_empty_transcripts_to_inbox():
     assert not should_append_to_inbox({"type": "transcript", "text": ""})
     assert not should_append_to_inbox({"type": "transcript", "text": "   "})
     assert not should_append_to_inbox({"type": "idle", "text": "小记，你好。"})
+
+
+def test_voice_upload_processes_wav_into_transcript_event(tmp_path):
+    def fake_transcribe(wav_path, lang, config):
+        assert wav_path.read_bytes() == b"RIFF-upload-wav"
+        assert lang == "zh"
+        assert config.fish_audio_key == "test-key"
+        return {"text": "从上传来的声音", "duration": 2.5, "language": "zh"}
+
+    event = stackchan_voice_upload_server.process_uploaded_wav(
+        b"RIFF-upload-wav",
+        make_config(),
+        lang="zh",
+        audio_dir=tmp_path,
+        transcribe_fn=fake_transcribe,
+    )
+
+    assert event["type"] == "transcript"
+    assert event["source"] == "voice_upload"
+    assert event["text"] == "从上传来的声音"
+    assert event["duration"] == 2.5
+    assert event["detected_language"] == "zh"
+    assert event["audio_bytes"] == len(b"RIFF-upload-wav")
+    assert Path(event["wav_path"]).exists()
+
+
+def test_voice_upload_requires_fish_key_before_processing(tmp_path):
+    with pytest.raises(RuntimeError, match="Fish Audio key is not configured"):
+        stackchan_voice_upload_server.process_uploaded_wav(
+            b"RIFF-upload-wav",
+            make_config(fish_audio_key=""),
+            audio_dir=tmp_path,
+        )
+
+
+def test_voice_upload_frontend_forwarding_skips_without_config():
+    result = stackchan_voice_upload_server.forward_to_frontend(
+        {"text": "你好"},
+        wake_url="",
+        session_id="",
+    )
+
+    assert result == {"ok": False, "skipped": "frontend wake not configured"}
+
+
+def test_voice_upload_wake_words_strip_activation_name():
+    matched, prompt_text, wake_word = stackchan_voice_upload_server.match_wake_word(
+        "小克，请看看窗外。",
+        ("小克", "小可", "老公", "脑公"),
+    )
+
+    assert matched is True
+    assert prompt_text == "请看看窗外。"
+    assert wake_word == "小克"
+
+    matched, prompt_text, wake_word = stackchan_voice_upload_server.match_wake_word(
+        "老公，帮我看看这段。",
+        ("小克", "小可", "老公", "脑公"),
+    )
+
+    assert matched is True
+    assert prompt_text == "帮我看看这段。"
+    assert wake_word == "老公"
+
+
+def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
+    def fake_post(*args, **kwargs):
+        raise AssertionError("frontend should not be called without wake word")
+
+    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
+
+    result = stackchan_voice_upload_server.forward_to_frontend(
+        {"text": "这只是房间里的声音"},
+        wake_url="http://127.0.0.1:3200/wake",
+        session_id="117067d6-1111-2222-3333-444444444444",
+        wake_words=("小克", "小可", "老公", "脑公"),
+    )
+
+    assert result == {
+        "ok": False,
+        "skipped": "wake word not found",
+        "wake_words": ["小克", "小可", "老公", "脑公"],
+    }
+
+
+def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok":true}'
+
+        def json(self):
+            return {"ok": True, "session_id": "117067d6-1111-2222-3333-444444444444"}
+
+    def fake_post(url, json, headers, timeout):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
+
+    result = stackchan_voice_upload_server.forward_to_frontend(
+        {"text": " 小克，听得到吗？ "},
+        wake_url="http://127.0.0.1:3200/wake",
+        session_id="117067d6-1111-2222-3333-444444444444",
+        token="agent-token",
+        model="claude-opus-4-6[1m]",
+        timeout=3,
+        wake_words=("小克", "小可", "老公", "脑公"),
+    )
+
+    assert result["ok"] is True
+    assert result["wake_word"] == "小克"
+    assert calls == [
+        {
+            "url": "http://127.0.0.1:3200/wake",
+            "json": {
+                "session_id": "117067d6-1111-2222-3333-444444444444",
+                "prompt": "[Stack-chan语音输入] 听得到吗？",
+                "force": True,
+                "quiet_minutes": 0,
+                "model": "claude-opus-4-6[1m]",
+            },
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer agent-token",
+            },
+            "timeout": 3,
+        }
+    ]
+
+
+def test_voice_upload_frontend_forwarding_retries_busy(monkeypatch):
+    calls = []
+
+    class BusyResponse:
+        status_code = 409
+        text = "busy"
+
+        def json(self):
+            raise ValueError
+
+    class OkResponse:
+        status_code = 200
+        text = '{"ok":true}'
+
+        def json(self):
+            return {"ok": True}
+
+    responses = [BusyResponse(), OkResponse()]
+
+    def fake_post(url, json, headers, timeout):
+        calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return responses.pop(0)
+
+    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
+    monkeypatch.setattr(stackchan_voice_upload_server.time, "sleep", lambda _: None)
+
+    result = stackchan_voice_upload_server.forward_to_frontend(
+        {"text": "稍等重试"},
+        wake_url="http://127.0.0.1:3200/wake",
+        session_id="117067d6-1111-2222-3333-444444444444",
+        retries=1,
+        retry_delay=0.1,
+    )
+
+    assert result == {"ok": True, "status_code": 200, "attempts": 2, "body": {"ok": True}}
+    assert len(calls) == 2
 
 
 def test_voice_inbox_appends_reads_formats_and_clears(tmp_path):
