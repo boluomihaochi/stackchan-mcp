@@ -15,8 +15,16 @@ from mcp_server.mcp_tools import can_stream_pcm, register_tools
 from mcp_server.stackchan_client import PcmPlaybackError, StackchanClient, post_pcm_stream
 from mcp_server.stackchan_config import PCM_SAMPLE_WIDTH, StackchanConfig, load_config
 from mcp_server.voice_inbox import append_event, clear_events, format_events, read_events
-from scripts import stackchan_frontend_session, stackchan_voice_upload_server
-from scripts.stackchan_voice_bridge import load_env_file, should_append_to_inbox
+from scripts import (
+    stackchan_frontend_session,
+    stackchan_frontend_wake,
+    stackchan_voice_upload_server,
+)
+from scripts.stackchan_voice_bridge import (
+    load_env_file,
+    load_frontend_token,
+    should_append_to_inbox,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -149,6 +157,17 @@ def test_voice_bridge_env_loader_does_not_override_existing_values(monkeypatch, 
     assert os.environ["FISH_AUDIO_KEY"] == "existing-key"
 
 
+def test_voice_bridge_loads_frontend_token_from_agent_host_env(monkeypatch, tmp_path):
+    env_path = tmp_path / "relay.env"
+    env_path.write_text("AGENT_HOST_TOKEN='agent-secret'\n", encoding="utf-8")
+    monkeypatch.delenv("STACKCHAN_FRONTEND_TOKEN", raising=False)
+    monkeypatch.setenv("STACKCHAN_FRONTEND_ENV", str(env_path))
+
+    load_frontend_token()
+
+    assert os.environ["STACKCHAN_FRONTEND_TOKEN"] == "agent-secret"
+
+
 def test_voice_bridge_only_appends_non_empty_transcripts_to_inbox():
     assert should_append_to_inbox({"type": "transcript", "text": "小记，你好。"})
     assert not should_append_to_inbox({"type": "transcript", "text": ""})
@@ -250,7 +269,7 @@ def test_voice_upload_token_authorization():
 
 
 def test_voice_upload_wake_words_strip_activation_name():
-    matched, prompt_text, wake_word = stackchan_voice_upload_server.match_wake_word(
+    matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
         "小克，请看看窗外。",
         ("小克", "小可", "老公", "脑公"),
     )
@@ -259,7 +278,7 @@ def test_voice_upload_wake_words_strip_activation_name():
     assert prompt_text == "请看看窗外。"
     assert wake_word == "小克"
 
-    matched, prompt_text, wake_word = stackchan_voice_upload_server.match_wake_word(
+    matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
         "老公，帮我看看这段。",
         ("小克", "小可", "老公", "脑公"),
     )
@@ -273,7 +292,7 @@ def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
     def fake_post(*args, **kwargs):
         raise AssertionError("frontend should not be called without wake word")
 
-    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
+    monkeypatch.setattr(stackchan_frontend_wake.requests, "post", fake_post)
 
     result = stackchan_voice_upload_server.forward_to_frontend(
         {"text": "这只是房间里的声音"},
@@ -303,7 +322,7 @@ def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
         calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return FakeResponse()
 
-    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
+    monkeypatch.setattr(stackchan_frontend_wake.requests, "post", fake_post)
 
     result = stackchan_voice_upload_server.forward_to_frontend(
         {"text": " 小克，听得到吗？ "},
@@ -359,8 +378,8 @@ def test_voice_upload_frontend_forwarding_retries_busy(monkeypatch):
         calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return responses.pop(0)
 
-    monkeypatch.setattr(stackchan_voice_upload_server.requests, "post", fake_post)
-    monkeypatch.setattr(stackchan_voice_upload_server.time, "sleep", lambda _: None)
+    monkeypatch.setattr(stackchan_frontend_wake.requests, "post", fake_post)
+    monkeypatch.setattr(stackchan_frontend_wake.time, "sleep", lambda _: None)
 
     result = stackchan_voice_upload_server.forward_to_frontend(
         {"text": "稍等重试"},

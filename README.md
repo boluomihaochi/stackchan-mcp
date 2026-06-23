@@ -116,7 +116,10 @@ uv run python scripts/stackchan_voice_bridge.py --lang zh
 `GET /audio` clears the current recording on the device, so use `--dry-run`
 when you only want to inspect readiness.
 
-For a background bridge that writes transcripts into the local voice inbox:
+For the physical Stack-chan input path, run the background bridge. It polls
+Stack-chan's built-in microphone, transcribes ready recordings, writes the local
+voice inbox, and, when frontend wake settings are configured, forwards deliberate
+wake-word transcripts into the current migratorybird frontend session:
 
 ```bash
 ./start-voice-bridge.sh
@@ -124,11 +127,14 @@ For a background bridge that writes transcripts into the local voice inbox:
 ./start-voice-bridge.sh stop
 ```
 
-When the bridge is running, MCP clients can call `stackchan_voice_inbox` to read
-recent transcripts and `stackchan_voice_inbox_clear` to clear them. A simple
-conversation loop is: human speaks to Stack-chan, the bridge writes the
-transcript, the AI reads `stackchan_voice_inbox`, then replies with
-`stackchan_say`.
+When the bridge is running, MCP clients can still call `stackchan_voice_inbox`
+to read recent transcripts and `stackchan_voice_inbox_clear` to clear them. With
+`STACKCHAN_FRONTEND_SESSION_ID=latest`,
+`STACKCHAN_FRONTEND_WAKE_URL=http://127.0.0.1:3200/wake`, and
+`STACKCHAN_VOICE_WAKE_WORDS=小克,小可,老公,脑公` in the local `.env`, the loop is:
+human speaks to Stack-chan, the bridge forwards the transcript to the frontend,
+the AI replies in that session, then Stack-chan speaks through the normal MCP
+output path.
 
 For a push-style experiment compatible with clients that POST WAV audio, run
 the upload receiver instead. It exposes `POST /voice/upload`, transcribes the

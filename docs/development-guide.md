@@ -283,33 +283,36 @@ It uses RMS thresholds to trigger recording and to end after silence.
 
 - The device stores the latest recording.
 - MCP clients can poll `/audio/status` and then fetch `/audio`.
-- `scripts/stackchan_voice_bridge.py` is a host-side bridge prototype that
-  polls this same path and prints JSONL transcripts. Use `--dry-run --once` to
-  inspect readiness without consuming the recording buffer. It reads
-  project-root `.env` without overriding already exported variables.
+- `scripts/stackchan_voice_bridge.py` is the host-side bridge for the physical
+  Stack-chan input path. It polls this same path, prints JSONL transcripts, and
+  can forward deliberate wake-word transcripts into migratorybird agent-host's
+  `/wake` endpoint when `STACKCHAN_FRONTEND_SESSION_ID` is configured. Use
+  `--dry-run --once` to inspect readiness without consuming the recording
+  buffer. It reads project-root `.env` without overriding already exported
+  variables.
 - `./start-voice-bridge.sh` runs the bridge in the background. Transcript
   events are appended to `STACKCHAN_VOICE_INBOX`, defaulting to
   `/tmp/stackchan_audio/voice_inbox.jsonl`.
 - MCP clients can call `stackchan_voice_inbox` and
   `stackchan_voice_inbox_clear` to read or clear those background transcripts.
-- `scripts/stackchan_voice_upload_server.py` is the push-mode host receiver. It
-  exposes `POST /voice/upload` for `audio/wav` clients, runs the same Fish ASR
-  path, appends transcript events to the same inbox, and can optionally forward
-  one transcript into migratorybird agent-host's `/wake` endpoint when
-  `STACKCHAN_FRONTEND_SESSION_ID` is configured.
+- `scripts/stackchan_voice_upload_server.py` is the push-mode host receiver for
+  browser/phone/PWA inputs. It exposes `POST /voice/upload` for `audio/wav`
+  clients, runs the same Fish ASR path, appends transcript events to the same
+  inbox, and can forward one transcript into migratorybird agent-host's `/wake`
+  endpoint when `STACKCHAN_FRONTEND_SESSION_ID` is configured.
 - `./start-voice-upload.sh` starts, stops, and health-checks that receiver. It
   reads project-root `.env` and respects `STACKCHAN_VOICE_UPLOAD_HOST`,
   `STACKCHAN_VOICE_UPLOAD_PORT`, `STACKCHAN_VOICE_UPLOAD_LOG`, and
   `STACKCHAN_VOICE_UPLOAD_PIDFILE`.
-- When `STACKCHAN_FRONTEND_TOKEN` is unset, `start-voice-upload.sh` reads
-  `AGENT_HOST_TOKEN` from `STACKCHAN_FRONTEND_ENV`, defaulting to
+- Both voice paths read `AGENT_HOST_TOKEN` from `STACKCHAN_FRONTEND_ENV` when
+  `STACKCHAN_FRONTEND_TOKEN` is unset, defaulting to
   `/Users/Isa/Projects/migratorybird-astro/relay/.env`. This avoids copying the
   frontend token into the Stack-chan repo.
-- The upload server intentionally does not guess the active frontend room. Use
+- The voice paths intentionally do not guess the active frontend room. Use
   `STACKCHAN_FRONTEND_SESSION_ID=<uuid>` when the voice prompt should enter a
   specific migratorybird session; omit it for inbox-only capture.
-- To avoid copying the wrong UUID, `start-voice-upload.sh` can resolve a
-  session from migratorybird's `web-sessions.json`: use
+- To avoid copying the wrong UUID, both voice paths can resolve a session from
+  migratorybird's `web-sessions.json`: use
   `STACKCHAN_FRONTEND_SESSION_ID=latest` for the latest non-archived session, or
   `STACKCHAN_FRONTEND_SESSION_TITLE="起居室_4"` for the latest non-archived
   session whose title contains that text.
