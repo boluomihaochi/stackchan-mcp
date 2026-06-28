@@ -1,6 +1,6 @@
 // face_service.cpp
 // Custom whale face PNG display from SPIFFS
-// Replaces m5stack-avatar with 小克's own face
+// Replaces m5stack-avatar with a project-specific face set
 
 #include "face_service.h"
 #include <M5Unified.h>

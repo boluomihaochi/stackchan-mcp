@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start Stack-chan MCP server in HTTP mode + cloudflared tunnel
-# For Chat/Cowork access via https://stackchan.migratorybird.xyz
+# Set STACKCHAN_PUBLIC_MCP_URL in .env when exposing it through a tunnel.
 #
 # Usage: ./start-http.sh        (start both)
 #        ./start-http.sh stop   (stop both)
@@ -17,7 +17,7 @@ fi
 STACKCHAN_PORT="${STACKCHAN_PORT:-8002}"
 MCP_PYTHON="${MCP_PYTHON:-}"
 MCP_MODULE="${MCP_MODULE:-mcp_server.server}"
-STACKCHAN_PUBLIC_MCP_URL="${STACKCHAN_PUBLIC_MCP_URL:-https://stackchan.migratorybird.xyz/mcp}"
+STACKCHAN_PUBLIC_MCP_URL="${STACKCHAN_PUBLIC_MCP_URL:-}"
 STACKCHAN_LOG_DIR="${STACKCHAN_LOG_DIR:-/tmp}"
 MCP_LOG="$STACKCHAN_LOG_DIR/stackchan_mcp_http.log"
 CLOUDFLARED_LOG="$STACKCHAN_LOG_DIR/cloudflared.log"
@@ -60,19 +60,26 @@ fi
 
 sleep 3
 
-# Verify
 echo ""
 echo "=== Status ==="
-if curl -s --max-time 5 "$STACKCHAN_PUBLIC_MCP_URL" -X POST \
-    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' 2>&1 | grep -q "serverInfo"; then
-    echo "✅ $STACKCHAN_PUBLIC_MCP_URL → Streamable HTTP OK"
+if [ -n "$STACKCHAN_PUBLIC_MCP_URL" ]; then
+    if curl -s --max-time 5 "$STACKCHAN_PUBLIC_MCP_URL" -X POST \
+        -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+        -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' 2>&1 | grep -q "serverInfo"; then
+        echo "✅ $STACKCHAN_PUBLIC_MCP_URL → Streamable HTTP OK"
+    else
+        echo "❌ Tunnel not responding yet (may need a few more seconds)"
+    fi
 else
-    echo "❌ Tunnel not responding yet (may need a few more seconds)"
+    echo "ℹ️  Public MCP URL not configured; set STACKCHAN_PUBLIC_MCP_URL to verify a tunnel."
 fi
 echo ""
 echo "Claude.ai MCP config:"
-echo "  URL: $STACKCHAN_PUBLIC_MCP_URL"
+if [ -n "$STACKCHAN_PUBLIC_MCP_URL" ]; then
+    echo "  URL: $STACKCHAN_PUBLIC_MCP_URL"
+else
+    echo "  URL: <set STACKCHAN_PUBLIC_MCP_URL>"
+fi
 echo "Logs:"
 echo "  MCP: $MCP_LOG"
 echo "  cloudflared: $CLOUDFLARED_LOG"

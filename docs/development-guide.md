@@ -285,7 +285,7 @@ It uses RMS thresholds to trigger recording and to end after silence.
 - MCP clients can poll `/audio/status` and then fetch `/audio`.
 - `scripts/stackchan_voice_bridge.py` is the host-side bridge for the physical
   Stack-chan input path. It polls this same path, prints JSONL transcripts, and
-  can forward deliberate wake-word transcripts into migratorybird agent-host's
+  can forward deliberate wake-word transcripts into a frontend agent-host's
   `/wake` endpoint when `STACKCHAN_FRONTEND_SESSION_ID` is configured. Use
   `--dry-run --once` to inspect readiness without consuming the recording
   buffer. It reads project-root `.env` without overriding already exported
@@ -298,30 +298,30 @@ It uses RMS thresholds to trigger recording and to end after silence.
 - `scripts/stackchan_voice_upload_server.py` is the push-mode host receiver for
   browser/phone/PWA inputs. It exposes `POST /voice/upload` for `audio/wav`
   clients, runs the same Fish ASR path, appends transcript events to the same
-  inbox, and can forward one transcript into migratorybird agent-host's `/wake`
+  inbox, and can forward one transcript into a frontend agent-host's `/wake`
   endpoint when `STACKCHAN_FRONTEND_SESSION_ID` is configured.
 - `./start-voice-upload.sh` starts, stops, and health-checks that receiver. It
   reads project-root `.env` and respects `STACKCHAN_VOICE_UPLOAD_HOST`,
   `STACKCHAN_VOICE_UPLOAD_PORT`, `STACKCHAN_VOICE_UPLOAD_LOG`, and
   `STACKCHAN_VOICE_UPLOAD_PIDFILE`.
 - Both voice paths read `AGENT_HOST_TOKEN` from `STACKCHAN_FRONTEND_ENV` when
-  `STACKCHAN_FRONTEND_TOKEN` is unset, defaulting to
-  `/Users/Isa/Projects/migratorybird-astro/relay/.env`. This avoids copying the
-  frontend token into the Stack-chan repo.
+  `STACKCHAN_FRONTEND_TOKEN` is unset. This avoids copying the frontend token
+  into the Stack-chan repo.
 - The voice paths intentionally do not guess the active frontend room. Use
   `STACKCHAN_FRONTEND_SESSION_ID=<uuid>` when the voice prompt should enter a
-  specific migratorybird session; omit it for inbox-only capture.
+  specific frontend session; omit it for inbox-only capture.
 - To avoid copying the wrong UUID, both voice paths can resolve a session from
-  migratorybird's `web-sessions.json`: use
+  a compatible frontend `web-sessions.json`: set `STACKCHAN_FRONTEND_REGISTRY`,
+  then use
   `STACKCHAN_FRONTEND_SESSION_ID=latest` for the latest non-archived session, or
-  `STACKCHAN_FRONTEND_SESSION_TITLE="起居室_4"` for the latest non-archived
+  `STACKCHAN_FRONTEND_SESSION_TITLE="lab-room"` for the latest non-archived
   session whose title contains that text.
 - If agent-host returns `409 busy`, the target session is currently generating.
   Configure `STACKCHAN_FRONTEND_RETRIES` and `STACKCHAN_FRONTEND_RETRY_DELAY`
   to retry instead of dropping the frontend injection; the transcript is still
   appended to the inbox first.
 - Configure `STACKCHAN_VOICE_WAKE_WORDS` as a comma-separated activation list
-  such as `小克,小可,老公,脑公` when the receiver should only forward deliberate
+  such as `小塔,机器人` when the receiver should only forward deliberate
   speech. A transcript without a wake word remains in the inbox but is not sent
   to the frontend.
 - The upload receiver serves a minimal recorder page at `/`. Mobile browsers
@@ -331,15 +331,17 @@ It uses RMS thresholds to trigger recording and to end after silence.
   `--config /tmp/empty-cloudflared.yml`; otherwise the existing
   `~/.cloudflared/config.yml` named-tunnel ingress rules can intercept the
   quick tunnel and return Cloudflare 404.
-- For phone tests, set `STACKCHAN_VOICE_UPLOAD_TOKEN` and open the recorder as
-  `https://...trycloudflare.com/?token=<token>`. The page carries that query
-  token into `POST /voice/upload`; unauthenticated uploads receive HTTP 401.
-- For daily phone use on Isa's Mac, use the named Cloudflare tunnel hostname
-  `https://stackchan-voice.migratorybird.xyz/?token=<token>`. The route lives in
-  `~/.cloudflared/config.yml` and points to `http://localhost:8767`. Keep this
-  as a single-level subdomain; `voice.stackchan.migratorybird.xyz` is a
-  second-level subdomain and may fail TLS handshakes with the default Cloudflare
-  certificate coverage.
+- For phone tests, set `STACKCHAN_VOICE_UPLOAD_TOKEN`, open the recorder as
+  `https://...trycloudflare.com/`, and enter the token in the page. The page
+  sends it as `X-Stackchan-Upload-Token`; unauthenticated uploads receive HTTP
+  401. Older `?token=...` links remain accepted for compatibility, but the page
+  moves that token into `sessionStorage` and cleans the address bar.
+- For daily phone use, point your own HTTPS route or reverse proxy at
+  `http://localhost:8767` and set `STACKCHAN_VOICE_PUBLIC_URL` to that public
+  recorder URL. If you use Cloudflare's default certificate coverage, keep the
+  route shape compatible with the certificate you actually have.
+- `STACKCHAN_VOICE_UPLOAD_RATE_PER_MINUTE` limits upload attempts per client IP;
+  set it to `0` only for local debugging.
 - `./start-voice-upload.sh status` checks the local receiver, public HTTPS
   route, frontend `agent-host`, launchd-managed `cloudflared`, resolved frontend
   session, and wake-word configuration.
@@ -369,7 +371,7 @@ curl -sS -X POST "http://$STACKCHAN_IP/mode" \
 
 Important environment variables:
 
-- `STACKCHAN_IP`: device IP address. The code default is `192.0.2.20`.
+- `STACKCHAN_IP`: device IP address. Set this explicitly in `.env`.
 - `STACKCHAN_PORT`: device HTTP port, usually `80`.
 - `MAC_IP`: host IP used in generated audio URLs.
 - `AUDIO_SERVE_PORT`: local HTTP port used to serve generated WAV files.

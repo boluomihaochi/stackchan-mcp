@@ -46,7 +46,10 @@ def load_env_file(path: Path) -> None:
 def load_frontend_token() -> None:
     if os.environ.get("STACKCHAN_FRONTEND_TOKEN"):
         return
-    env_path = Path(os.environ.get("STACKCHAN_FRONTEND_ENV", "/Users/Isa/Projects/migratorybird-astro/relay/.env"))
+    env_path_raw = os.environ.get("STACKCHAN_FRONTEND_ENV", "")
+    if not env_path_raw:
+        return
+    env_path = Path(env_path_raw)
     if not env_path.exists():
         return
 
@@ -161,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wake-session-id",
         default=os.environ.get("STACKCHAN_FRONTEND_SESSION_ID", ""),
-        help="migratorybird frontend session UUID, or latest/auto.",
+        help="Frontend session UUID, or latest/auto when STACKCHAN_FRONTEND_REGISTRY is configured.",
     )
     parser.add_argument(
         "--wake-session-title",

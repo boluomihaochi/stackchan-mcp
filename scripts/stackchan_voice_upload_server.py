@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import re
 import sys
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -29,6 +33,8 @@ from scripts.stackchan_frontend_wake import (  # noqa: E402
 from scripts.stackchan_voice_bridge import load_env_file, should_append_to_inbox  # noqa: E402
 
 DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+DEFAULT_UPLOAD_RATE_PER_MINUTE = 12
+TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^\s&]+")
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,29 @@ class ServerOptions:
     prompt_prefix: str
     wake_words: tuple[str, ...]
     upload_token: str
+    upload_rate_per_minute: int
+    allowed_origins: tuple[str, ...]
+
+
+class UploadRateLimiter:
+    def __init__(self, limit_per_minute: int):
+        self.limit_per_minute = limit_per_minute
+        self._attempts: defaultdict[str, deque[float]] = defaultdict(deque)
+        self._lock = Lock()
+
+    def allow(self, client_id: str, *, now: float | None = None) -> bool:
+        if self.limit_per_minute <= 0:
+            return True
+        now = time.monotonic() if now is None else now
+        window_start = now - 60.0
+        with self._lock:
+            attempts = self._attempts[client_id]
+            while attempts and attempts[0] < window_start:
+                attempts.popleft()
+            if len(attempts) >= self.limit_per_minute:
+                return False
+            attempts.append(now)
+            return True
 
 
 def utc_now() -> str:
@@ -60,9 +89,17 @@ def write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, 
     handler.wfile.write(body)
 
 
+def send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
+    origin = handler.headers.get("Origin", "")
+    allowed = getattr(handler.server.options, "allowed_origins", ())
+    if origin and origin in allowed:
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Vary", "Origin")
+
+
 def send_json_headers(handler: BaseHTTPRequestHandler, status: int, content_length: int) -> None:
     handler.send_response(status)
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    send_cors_headers(handler)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(content_length))
     handler.end_headers()
@@ -76,16 +113,29 @@ def write_html(handler: BaseHTTPRequestHandler, status: int, html: str) -> None:
 
 def send_html_headers(handler: BaseHTTPRequestHandler, status: int, content_length: int) -> None:
     handler.send_response(status)
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    send_cors_headers(handler)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(content_length))
     handler.end_headers()
 
 
 def build_recorder_page(options: ServerOptions) -> str:
-    wake_words = " / ".join(options.wake_words) if options.wake_words else "未启用"
+    wake_words = " / ".join(html.escape(word) for word in options.wake_words) if options.wake_words else "未启用"
     frontend = "enabled" if options.wake_url and options.wake_session_id else "inbox only"
+    wake_hint = (
+        f"说话开头带 {wake_words} 之一，才会转发到前端；不带唤醒词的录音只进本地 inbox。"
+        if options.wake_words
+        else "当前未配置唤醒词；录音会先进入本地 inbox，只有配置 frontend 和唤醒规则后才会转发。"
+    )
     upload_path = "/voice/upload"
+    token_block = ""
+    if options.upload_token:
+        token_block = """
+    <label class="token">上传 token
+      <input id="upload-token" type="password" autocomplete="off" placeholder="输入本机 .env 里的上传 token">
+    </label>
+    <p class="hint">token 只保存在这个浏览器标签页的 sessionStorage；如果旧链接带了 ?token=，页面会自动收进这里并清理地址栏。</p>
+"""
     return f"""<!doctype html>
 <html lang="zh">
 <head>
@@ -126,6 +176,23 @@ def build_recorder_page(options: ServerOptions) -> str:
     p {{ line-height: 1.6; }}
     .meta {{ color: var(--muted); font-size: 14px; margin-top: 0; }}
     .controls {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 22px 0; }}
+    label.token {{
+      display: block;
+      margin: 18px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    label.token input {{
+      display: block;
+      width: 100%;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      background: white;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 16px;
+    }}
     button, label.file {{
       border: 1px solid var(--line);
       background: white;
@@ -156,7 +223,8 @@ def build_recorder_page(options: ServerOptions) -> str:
   <main>
     <h1>Stack-chan Voice Upload</h1>
     <p class="meta">frontend: {frontend} · wake words: {wake_words}</p>
-    <p>说话开头带“小克 / 小可 / 老公 / 脑公”之一，才会转发到前端；不带唤醒词的录音只进本地 inbox。</p>
+    <p>{wake_hint}</p>
+{token_block}
     <div class="controls">
       <button id="start" class="primary">开始录音</button>
       <button id="stop" class="danger" disabled>停止并发送</button>
@@ -170,22 +238,52 @@ def build_recorder_page(options: ServerOptions) -> str:
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
     const fileInput = document.getElementById('file');
+    const tokenInput = document.getElementById('upload-token');
+    const tokenStorageKey = 'stackchan_voice_upload_token';
     let audioContext, stream, source, processor, chunks, sampleRate;
 
     function say(message, data) {{
       log.textContent = data ? message + "\\n" + JSON.stringify(data, null, 2) : message;
     }}
 
+    function initializeTokenInput() {{
+      const query = new URLSearchParams(window.location.search);
+      const tokenFromUrl = query.get('token') || '';
+      if (tokenFromUrl) {{
+        sessionStorage.setItem(tokenStorageKey, tokenFromUrl);
+        query.delete('token');
+        const cleanQuery = query.toString();
+        const cleanUrl = window.location.pathname + (cleanQuery ? '?' + cleanQuery : '') + window.location.hash;
+        window.history.replaceState(null, '', cleanUrl);
+      }}
+      if (!tokenInput) return;
+      tokenInput.value = sessionStorage.getItem(tokenStorageKey) || '';
+      tokenInput.addEventListener('input', () => {{
+        const value = tokenInput.value.trim();
+        if (value) {{
+          sessionStorage.setItem(tokenStorageKey, value);
+        }} else {{
+          sessionStorage.removeItem(tokenStorageKey);
+        }}
+      }});
+    }}
+
+    function uploadHeaders(blob) {{
+      const headers = {{ 'Content-Type': blob.type || 'audio/wav' }};
+      const token = (tokenInput?.value || sessionStorage.getItem(tokenStorageKey) || '').trim();
+      if (token) headers['X-Stackchan-Upload-Token'] = token;
+      return headers;
+    }}
+
     function uploadUrl() {{
-      const token = new URLSearchParams(window.location.search).get('token') || '';
-      return token ? '{upload_path}?token=' + encodeURIComponent(token) : '{upload_path}';
+      return '{upload_path}';
     }}
 
     async function postAudio(blob) {{
       say('Uploading...');
       const response = await fetch(uploadUrl(), {{
         method: 'POST',
-        headers: {{ 'Content-Type': blob.type || 'audio/wav' }},
+        headers: uploadHeaders(blob),
         body: blob,
       }});
       const data = await response.json().catch(() => ({{ ok: false, error: 'non-json response' }}));
@@ -276,6 +374,8 @@ def build_recorder_page(options: ServerOptions) -> str:
         fileInput.value = '';
       }}
     }});
+
+    initializeTokenInput();
   </script>
 </body>
 </html>"""
@@ -345,13 +445,15 @@ class VoiceUploadServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
         self.config = config
         self.options = options
+        self.rate_limiter = UploadRateLimiter(options.upload_rate_per_minute)
 
 
 class VoiceUploadHandler(BaseHTTPRequestHandler):
     server: VoiceUploadServer
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[voice-upload] {self.address_string()} - {fmt % args}", flush=True)
+        message = TOKEN_QUERY_RE.sub(r"\1<redacted>", fmt % args)
+        print(f"[voice-upload] {self.address_string()} - {message}", flush=True)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -394,15 +496,25 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        send_cors_headers(self)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Stackchan-Upload-Token")
         self.end_headers()
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path != "/voice/upload":
             write_json(self, 404, {"ok": False, "error": "not found"})
+            return
+        if not self.server.rate_limiter.allow(self.client_address[0]):
+            self.send_response(429)
+            send_cors_headers(self)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Retry-After", "60")
+            body = b'{"ok":false,"error":"rate limit exceeded"}'
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if not self.is_upload_authorized():
             write_json(self, 401, {"ok": False, "error": "unauthorized"})
@@ -486,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Receive Stack-chan pushed WAV recordings at /voice/upload, transcribe them, "
-            "write the local voice inbox, and optionally forward text into migratorybird's /wake endpoint."
+            "write the local voice inbox, and optionally forward text into a frontend /wake endpoint."
         )
     )
     parser.add_argument("--host", default=os.environ.get("STACKCHAN_VOICE_UPLOAD_HOST", "127.0.0.1"))
@@ -515,7 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wake-session-id",
         default=os.environ.get("STACKCHAN_FRONTEND_SESSION_ID", ""),
-        help="migratorybird frontend session UUID to receive transcripts.",
+        help="Frontend session UUID to receive transcripts.",
     )
     parser.add_argument("--wake-token", default=os.environ.get("STACKCHAN_FRONTEND_TOKEN", ""))
     parser.add_argument("--wake-model", default=os.environ.get("STACKCHAN_FRONTEND_MODEL", ""))
@@ -561,7 +673,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--upload-token",
         default=os.environ.get("STACKCHAN_VOICE_UPLOAD_TOKEN", ""),
-        help="Optional token required for POST /voice/upload. Use ?token=... on the recorder page.",
+        help=(
+            "Optional token required for POST /voice/upload. The recorder page sends it as "
+            "X-Stackchan-Upload-Token; ?token=... is accepted only for backward compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--upload-rate-per-minute",
+        type=int,
+        default=int(os.environ.get("STACKCHAN_VOICE_UPLOAD_RATE_PER_MINUTE", str(DEFAULT_UPLOAD_RATE_PER_MINUTE))),
+        help="Maximum POST /voice/upload attempts per client IP per minute. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="Allowed browser Origin for cross-origin upload requests. Repeatable. Same-origin use does not need this.",
     )
     return parser
 
@@ -589,6 +716,8 @@ def main() -> int:
         prompt_prefix=args.prompt_prefix,
         wake_words=parse_wake_words(args.wake_words),
         upload_token=args.upload_token,
+        upload_rate_per_minute=args.upload_rate_per_minute,
+        allowed_origins=tuple(args.allowed_origin),
     )
     server = VoiceUploadServer((args.host, args.port), VoiceUploadHandler, config=config, options=options)
     print(

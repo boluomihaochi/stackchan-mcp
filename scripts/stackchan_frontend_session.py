@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-DEFAULT_REGISTRY = Path("/Users/Isa/Projects/migratorybird-astro/relay/data/web-sessions.json")
+def default_registry_path() -> Path:
+    return Path(os.environ.get("STACKCHAN_FRONTEND_REGISTRY", "web-sessions.json"))
 
 
-def load_sessions(path: str | Path = DEFAULT_REGISTRY) -> list[dict[str, Any]]:
-    registry_path = Path(path)
+def load_sessions(path: str | Path | None = None) -> list[dict[str, Any]]:
+    registry_path = Path(path) if path is not None else default_registry_path()
     try:
         raw = json.loads(registry_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -59,10 +61,10 @@ def select_session(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Resolve the migratorybird frontend session Stack-chan should wake."
+        description="Resolve the frontend session Stack-chan should wake."
     )
-    parser.add_argument("--registry", default=str(DEFAULT_REGISTRY), help="web-sessions.json path")
-    parser.add_argument("--title", default="", help="Optional title substring, e.g. 起居室_4")
+    parser.add_argument("--registry", default=None, help="web-sessions.json path")
+    parser.add_argument("--title", default="", help="Optional title substring, e.g. lab-room")
     parser.add_argument("--include-archived", action="store_true")
     parser.add_argument("--json", action="store_true", help="Print the selected session object")
     return parser

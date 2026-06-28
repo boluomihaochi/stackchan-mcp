@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.example.stackchan-voice-upload</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/stackchan/.venv/bin/python</string>
+    <string>scripts/stackchan_voice_upload_server.py</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8767</string>
+    <string>--lang</string>
+    <string>zh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/stackchan</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/stackchan_voice_upload.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/stackchan_voice_upload.log</string>
+</dict>
+</plist>

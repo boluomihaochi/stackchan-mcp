@@ -234,15 +234,18 @@ def test_voice_upload_recorder_page_exposes_upload_ui():
             wake_force=True,
             wake_quiet_minutes=0,
             prompt_prefix="[Stack-chan语音输入] ",
-            wake_words=("小克", "小可", "老公", "脑公"),
-            upload_token="upload-token",
+            wake_words=("小塔", "机器人"),
+            upload_token="secret-token-for-test",
+            upload_rate_per_minute=12,
+            allowed_origins=(),
         )
     )
 
     assert "Stack-chan Voice Upload" in html
     assert "/voice/upload" in html
-    assert "?token=" in html
-    assert "小克 / 小可 / 老公 / 脑公" in html
+    assert "X-Stackchan-Upload-Token" in html
+    assert "secret-token-for-test" not in html
+    assert "小塔 / 机器人" in html
 
 
 def test_voice_upload_token_authorization():
@@ -266,46 +269,61 @@ def test_voice_upload_token_authorization():
         {"Authorization": "Bearer secret-token"},
         "secret-token",
     )
+    assert stackchan_voice_upload_server.is_upload_authorized(
+        "/voice/upload",
+        {"X-Stackchan-Upload-Token": "secret-token"},
+        "secret-token",
+    )
+
+
+def test_voice_upload_rate_limiter_limits_by_client():
+    limiter = stackchan_voice_upload_server.UploadRateLimiter(limit_per_minute=2)
+
+    assert limiter.allow("192.0.2.1", now=100.0) is True
+    assert limiter.allow("192.0.2.1", now=101.0) is True
+    assert limiter.allow("192.0.2.1", now=102.0) is False
+    assert limiter.allow("192.0.2.2", now=102.0) is True
+    assert limiter.allow("192.0.2.1", now=161.1) is True
 
 
 def test_voice_upload_wake_words_preserve_activation_name():
     matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
-        "小克，请看看窗外。",
-        ("小克", "小可", "老公", "脑公"),
+        "小塔，请看看窗外。",
+        ("小塔", "机器人"),
     )
 
     assert matched is True
-    assert prompt_text == "小克，请看看窗外。"
-    assert wake_word == "小克"
+    assert prompt_text == "小塔，请看看窗外。"
+    assert wake_word == "小塔"
 
     matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
-        "老公，帮我看看这段。",
-        ("小克", "小可", "老公", "脑公"),
+        "机器人，帮我看看这段。",
+        ("小塔", "机器人"),
     )
 
     assert matched is True
-    assert prompt_text == "老公，帮我看看这段。"
-    assert wake_word == "老公"
+    assert prompt_text == "机器人，帮我看看这段。"
+    assert wake_word == "机器人"
 
 
 def test_voice_upload_wake_words_allow_leading_fillers_and_repeated_first_sound():
     matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
-        "好的，老老公，晚安。",
-        ("小克", "小可", "老公", "脑公"),
+        "好的，小小塔，晚安。",
+        ("小塔", "机器人"),
     )
 
     assert matched is True
-    assert prompt_text == "好的，老老公，晚安。"
-    assert wake_word == "老公"
+    assert prompt_text == "好的，小小塔，晚安。"
+    assert wake_word == "小塔"
 
     matched, prompt_text, wake_word = stackchan_frontend_wake.match_wake_word(
-        "嗯嗯，小克，继续测试。",
-        ("小克", "小可", "老公", "脑公"),
+        "嗯嗯，小塔，继续测试。",
+        ("小塔", "机器人"),
     )
 
     assert matched is True
-    assert prompt_text == "嗯嗯，小克，继续测试。"
-    assert wake_word == "小克"
+    assert prompt_text == "嗯嗯，小塔，继续测试。"
+    assert wake_word == "小塔"
 
 
 def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
@@ -318,13 +336,13 @@ def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
         {"text": "这只是房间里的声音"},
         wake_url="http://127.0.0.1:3200/wake",
         session_id="117067d6-1111-2222-3333-444444444444",
-        wake_words=("小克", "小可", "老公", "脑公"),
+        wake_words=("小塔", "机器人"),
     )
 
     assert result == {
         "ok": False,
         "skipped": "wake word not found",
-        "wake_words": ["小克", "小可", "老公", "脑公"],
+        "wake_words": ["小塔", "机器人"],
     }
 
 
@@ -345,23 +363,23 @@ def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
     monkeypatch.setattr(stackchan_frontend_wake.requests, "post", fake_post)
 
     result = stackchan_voice_upload_server.forward_to_frontend(
-        {"text": " 小克，听得到吗？ "},
+        {"text": " 小塔，听得到吗？ "},
         wake_url="http://127.0.0.1:3200/wake",
         session_id="117067d6-1111-2222-3333-444444444444",
         token="agent-token",
         model="claude-opus-4-6[1m]",
         timeout=3,
-        wake_words=("小克", "小可", "老公", "脑公"),
+        wake_words=("小塔", "机器人"),
     )
 
     assert result["ok"] is True
-    assert result["wake_word"] == "小克"
+    assert result["wake_word"] == "小塔"
     assert calls == [
         {
             "url": "http://127.0.0.1:3200/wake",
             "json": {
                 "session_id": "117067d6-1111-2222-3333-444444444444",
-                "prompt": "[Stack-chan语音输入] 小克，听得到吗？",
+                "prompt": "[Stack-chan语音输入] 小塔，听得到吗？",
                 "force": True,
                 "quiet_minutes": 0,
                 "model": "claude-opus-4-6[1m]",
@@ -415,9 +433,9 @@ def test_voice_upload_frontend_forwarding_retries_busy(monkeypatch):
 
 def test_frontend_session_selects_latest_non_archived():
     sessions = [
-        {"id": "old", "title": "起居室_3", "last": "2026-06-20T20:55:19.411Z"},
+        {"id": "old", "title": "lab-room-3", "last": "2026-06-20T20:55:19.411Z"},
         {"id": "archived-new", "title": "Test", "last": "2026-06-25T00:00:00Z", "archived": True},
-        {"id": "new", "title": "起居室_4", "last": "2026-06-23T17:35:54.803Z"},
+        {"id": "new", "title": "lab-room-4", "last": "2026-06-23T17:35:54.803Z"},
     ]
 
     selected = stackchan_frontend_session.select_session(sessions)
@@ -428,12 +446,12 @@ def test_frontend_session_selects_latest_non_archived():
 
 def test_frontend_session_selects_latest_by_title():
     sessions = [
-        {"id": "room4-old", "title": "起居室_4", "last": "2026-06-21T00:00:00Z"},
-        {"id": "room3-new", "title": "起居室_3", "last": "2026-06-23T00:00:00Z"},
-        {"id": "room4-new", "title": "起居室_4 · 续", "last": "2026-06-22T00:00:00Z"},
+        {"id": "room4-old", "title": "lab-room-4", "last": "2026-06-21T00:00:00Z"},
+        {"id": "room3-new", "title": "lab-room-3", "last": "2026-06-23T00:00:00Z"},
+        {"id": "room4-new", "title": "lab-room-4 continued", "last": "2026-06-22T00:00:00Z"},
     ]
 
-    selected = stackchan_frontend_session.select_session(sessions, title="起居室_4")
+    selected = stackchan_frontend_session.select_session(sessions, title="lab-room-4")
 
     assert selected is not None
     assert selected["id"] == "room4-new"

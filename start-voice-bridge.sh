@@ -8,7 +8,7 @@ LOG_FILE="${STACKCHAN_VOICE_BRIDGE_LOG:-/tmp/stackchan_voice_bridge.log}"
 PID_FILE="${STACKCHAN_VOICE_BRIDGE_PIDFILE:-/tmp/stackchan_voice_bridge.pid}"
 LANGUAGE="${STACKCHAN_VOICE_LANG:-zh}"
 INTERVAL="${STACKCHAN_VOICE_INTERVAL:-1}"
-LAUNCHD_LABEL="${STACKCHAN_VOICE_BRIDGE_LABEL:-xyz.migratorybird.stackchan-voice-bridge}"
+LAUNCHD_LABEL="${STACKCHAN_VOICE_BRIDGE_LABEL:-xyz.stackchan.voice-bridge}"
 LAUNCHD_PLIST="${STACKCHAN_VOICE_BRIDGE_PLIST:-$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist}"
 LAUNCHD_DOMAIN="gui/$(id -u)"
 

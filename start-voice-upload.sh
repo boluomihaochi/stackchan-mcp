@@ -13,7 +13,10 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 load_frontend_token() {
-    local env_path="${STACKCHAN_FRONTEND_ENV:-/Users/Isa/Projects/migratorybird-astro/relay/.env}"
+    local env_path="${STACKCHAN_FRONTEND_ENV:-}"
+    if [ -z "$env_path" ]; then
+        return 0
+    fi
     if [ -n "${STACKCHAN_FRONTEND_TOKEN:-}" ] || [ ! -f "$env_path" ]; then
         return 0
     fi
@@ -76,12 +79,42 @@ PORT="${STACKCHAN_VOICE_UPLOAD_PORT:-8767}"
 LOG_FILE="${STACKCHAN_VOICE_UPLOAD_LOG:-/tmp/stackchan_voice_upload.log}"
 PID_FILE="${STACKCHAN_VOICE_UPLOAD_PIDFILE:-/tmp/stackchan_voice_upload.pid}"
 LANGUAGE="${STACKCHAN_VOICE_LANG:-zh}"
-PUBLIC_URL="${STACKCHAN_VOICE_PUBLIC_URL:-https://stackchan-voice.migratorybird.xyz}"
-CLOUDFLARED_LABEL="${STACKCHAN_CLOUDFLARED_LAUNCHD_LABEL:-xyz.migratorybird.cloudflared}"
+PUBLIC_URL="${STACKCHAN_VOICE_PUBLIC_URL:-}"
+CLOUDFLARED_LABEL="${STACKCHAN_CLOUDFLARED_LAUNCHD_LABEL:-xyz.stackchan.cloudflared}"
+VOICE_UPLOAD_LABEL="${STACKCHAN_VOICE_UPLOAD_LAUNCHD_LABEL:-xyz.stackchan.voice-upload}"
 FRONTEND_HEALTH_URL="${STACKCHAN_FRONTEND_HEALTH_URL:-http://127.0.0.1:3200/health}"
+PYTHON_BIN="${STACKCHAN_VOICE_PYTHON:-$SCRIPT_DIR/.venv/bin/python}"
+
+python_cmd() {
+    if [ -x "$PYTHON_BIN" ]; then
+        printf '%s\n' "$PYTHON_BIN"
+    else
+        printf '%s\n' "uv run python"
+    fi
+}
 
 is_running() {
-    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    [ -n "$(running_pid)" ]
+}
+
+launchd_loaded() {
+    launchctl print "gui/$(id -u)/$VOICE_UPLOAD_LABEL" >/dev/null 2>&1
+}
+
+launchd_pid() {
+    launchctl print "gui/$(id -u)/$VOICE_UPLOAD_LABEL" 2>/dev/null | awk -F'= ' '/pid =/ {print $2; exit}'
+}
+
+running_pid() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        cat "$PID_FILE"
+        return 0
+    fi
+    if launchd_loaded; then
+        launchd_pid
+        return 0
+    fi
+    port_owner || true
 }
 
 port_owner() {
@@ -103,11 +136,12 @@ public_health_url() {
 }
 
 recorder_url() {
-    local url="${PUBLIC_URL%/}/"
+    echo "${PUBLIC_URL%/}/"
+}
+
+print_upload_token_hint() {
     if [ -n "${STACKCHAN_VOICE_UPLOAD_TOKEN:-}" ]; then
-        echo "${url}?token=${STACKCHAN_VOICE_UPLOAD_TOKEN}"
-    else
-        echo "$url"
+        echo "Upload token: configured; enter it in the recorder page. It is not printed in URLs."
     fi
 }
 
@@ -155,17 +189,27 @@ case "${1:-start}" in
             exit 1
         fi
         cd "$SCRIPT_DIR" || exit 1
-        nohup uv run python scripts/stackchan_voice_upload_server.py \
-            --host "$HOST" \
-            --port "$PORT" \
-            --lang "$LANGUAGE" \
-            >> "$LOG_FILE" 2>&1 &
+        if [ -x "$PYTHON_BIN" ]; then
+            nohup "$PYTHON_BIN" scripts/stackchan_voice_upload_server.py \
+                --host "$HOST" \
+                --port "$PORT" \
+                --lang "$LANGUAGE" \
+                >> "$LOG_FILE" 2>&1 &
+        else
+            nohup uv run python scripts/stackchan_voice_upload_server.py \
+                --host "$HOST" \
+                --port "$PORT" \
+                --lang "$LANGUAGE" \
+                >> "$LOG_FILE" 2>&1 &
+        fi
         echo $! > "$PID_FILE"
         echo "Started Stack-chan voice upload receiver: PID $(cat "$PID_FILE")"
+        echo "Runtime: $(python_cmd)"
         echo "URL: http://$HOST:$PORT/voice/upload"
         echo "Health: $(health_url)"
         if [ -n "$PUBLIC_URL" ]; then
             echo "Public recorder: $(recorder_url)"
+            print_upload_token_hint
         fi
         echo "Log: $LOG_FILE"
         if wait_for_health; then
@@ -185,8 +229,12 @@ case "${1:-start}" in
         fi
         ;;
     stop)
-        if is_running; then
-            kill "$(cat "$PID_FILE")"
+        if launchd_loaded; then
+            launchctl bootout "gui/$(id -u)/$VOICE_UPLOAD_LABEL" >/dev/null 2>&1 || true
+            rm -f "$PID_FILE"
+            echo "Stopped Stack-chan voice upload receiver launchd service: $VOICE_UPLOAD_LABEL"
+        elif is_running; then
+            kill "$(running_pid)"
             rm -f "$PID_FILE"
             echo "Stopped Stack-chan voice upload receiver."
         else
@@ -196,11 +244,15 @@ case "${1:-start}" in
         ;;
     status)
         if is_running; then
-            echo "Stack-chan voice upload receiver running: PID $(cat "$PID_FILE")"
+            echo "Stack-chan voice upload receiver running: PID $(running_pid)"
+            if launchd_loaded; then
+                echo "Launchd: $VOICE_UPLOAD_LABEL"
+            fi
             check_url "local upload health" "$(health_url)"
             if [ -n "$PUBLIC_URL" ]; then
                 check_url "public upload health" "$(public_health_url)"
                 echo "Recorder: $(recorder_url)"
+                print_upload_token_hint
             fi
             check_url "frontend agent-host" "$FRONTEND_HEALTH_URL"
             check_cloudflared

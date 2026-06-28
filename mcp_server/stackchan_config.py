@@ -78,9 +78,9 @@ def load_config() -> StackchanConfig:
     )
 
     return StackchanConfig(
-        stackchan_ip=os.environ.get("STACKCHAN_IP", "192.0.2.20"),
+        stackchan_ip=os.environ.get("STACKCHAN_IP", "127.0.0.1"),
         stackchan_port=int(os.environ.get("STACKCHAN_PORT", 80)),
-        mac_ip=os.environ.get("MAC_IP", "10.83.20.149"),
+        mac_ip=os.environ.get("MAC_IP", "127.0.0.1"),
         audio_serve_port=int(os.environ.get("AUDIO_SERVE_PORT", 5060)),
         tts_engine=os.environ.get("TTS_ENGINE", "fish-audio"),
         audio_mode=audio_mode,
@@ -89,8 +89,8 @@ def load_config() -> StackchanConfig:
         pcm_limit=pcm_limit,
         pcm_declick_samples=pcm_declick_samples,
         pcm_zero_cross_window=pcm_zero_cross_window,
-        edge_tts_bin=os.environ.get("EDGE_TTS_BIN", "/Users/Isa/Kokoro-TTS-Local/venv/bin/edge-tts"),
+        edge_tts_bin=os.environ.get("EDGE_TTS_BIN", "edge-tts"),
         fish_audio_key=os.environ.get("FISH_AUDIO_KEY", ""),
-        fish_audio_model_zh=os.environ.get("FISH_AUDIO_MODEL_ZH", "411d04608a3a498192e16724689e7993"),
-        fish_audio_model_en=os.environ.get("FISH_AUDIO_MODEL_EN", "a1e3e14176b0496c84e6009d672c23f8"),
+        fish_audio_model_zh=os.environ.get("FISH_AUDIO_MODEL_ZH", ""),
+        fish_audio_model_en=os.environ.get("FISH_AUDIO_MODEL_EN", ""),
     )

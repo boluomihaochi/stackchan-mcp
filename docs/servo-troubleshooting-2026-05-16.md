@@ -56,7 +56,7 @@ Before the fix:
 
 ## What Was Tried
 
-1. Confirmed that the live device was reachable at `192.0.2.20`.
+1. Confirmed that the live device was reachable on the configured LAN IP.
 2. Sent small movement commands to avoid stressing the mechanism.
 3. Added `/servo/status` for diagnostics.
 4. Logged command targets, raw servo positions, and SCServo command results.
