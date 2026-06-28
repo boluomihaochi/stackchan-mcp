@@ -10,6 +10,7 @@
 #include "mic_service.h"
 #include "recording_store.h"
 #include "pcm_upload.h"
+#include "audio_gate.h"
 
 static WebServer server(80);
 
@@ -328,6 +329,7 @@ static void handleServoStatus() {
 static void handlePlaybackStatus() {
     PlaybackStatus playback = getPlaybackStatus();
     ServoStatus servo = getServoStatus();
+    AudioGateStatus audio = getAudioGateStatus();
 
     JsonDocument doc;
     doc["playing"] = playback.playing;
@@ -347,6 +349,12 @@ static void handlePlaybackStatus() {
     doc["gesture"] = servo.gestureName;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["free_psram"] = ESP.getFreePsram();
+    doc["audio_gate_initialized"] = audio.initialized;
+    doc["audio_gate_locked"] = audio.locked;
+    doc["audio_gate_owner"] = audio.owner;
+    doc["audio_gate_lock_count"] = audio.lockCount;
+    doc["audio_gate_failed_acquire_count"] = audio.failedAcquireCount;
+    doc["stack_watermark"] = audio.stackWatermark;
 
     String body;
     serializeJson(doc, body);

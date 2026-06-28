@@ -6,6 +6,7 @@
 #include "config.h"
 #include "face_service.h"
 #include "wav_parser.h"
+#include "audio_gate.h"
 
 struct PlaybackRuntimeState {
     size_t lipSyncOffset = 0;
@@ -155,6 +156,7 @@ void initPlayback() {
         1   // Core 1
     );
     Serial.println("[PLAY] Download task started on Core 1");
+    logAudioMemory("play-init");
 }
 
 // ════════════════════════════════════════
@@ -202,6 +204,14 @@ static bool startDownloadedWavPlayback(uint8_t* wavData, size_t wavSize) {
     s_playbackDeadlineMs = millis() +
         (unsigned long)((s_playbackState.pcmSize / bytes_per_sec) * 1000.0f) + 2000;
 
+    if (!audioGateEnter("wav-play", 1000)) {
+        Serial.println("[PLAY] Audio gate busy; dropped WAV playback");
+        retireCurrentPlaybackBuffer();
+        setFaceExpression(FACE_IDLE);
+        s_micResumeRequested = true;
+        return false;
+    }
+
     // マイク停止 → スピーカー起動
     if (M5.Mic.isRunning()) {
         M5.Mic.end();
@@ -219,6 +229,7 @@ static bool startDownloadedWavPlayback(uint8_t* wavData, size_t wavSize) {
         retireCurrentPlaybackBuffer();
         setFaceExpression(FACE_IDLE);
         s_micResumeRequested = true;
+        audioGateLeave("wav-play");
         return false;
     }
     setFaceExpression(FACE_PLAYING);
@@ -232,6 +243,8 @@ static bool startDownloadedWavPlayback(uint8_t* wavData, size_t wavSize) {
     clearQueuedPcmPlayback();
     s_playbackStartMs  = millis();
     Serial.println("[PLAY] Speaker started");
+    logAudioMemory("wav-start");
+    audioGateLeave("wav-play");
     return true;
 }
 
@@ -287,6 +300,17 @@ PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const Strin
     s_playbackDeadlineMs = millis() +
         (unsigned long)((pcmSize / bytes_per_sec) * 1000.0f) + 2000;
 
+    if (!audioGateEnter("pcm-play", 1000)) {
+        Serial.println("[PCM] Audio gate busy; dropped PCM playback");
+        free(s_currentAudioData);
+        s_currentAudioData = nullptr;
+        s_currentAudioSize = 0;
+        s_playbackState.pcmSize = 0;
+        setFaceExpression(FACE_IDLE);
+        s_micResumeRequested = true;
+        return PCM_PLAYBACK_SPEAKER_FAILED;
+    }
+
     if (M5.Mic.isRunning()) {
         M5.Mic.end();
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -311,6 +335,7 @@ PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const Strin
         s_playbackState.pcmSize = 0;
         setFaceExpression(FACE_IDLE);
         s_micResumeRequested = true;
+        audioGateLeave("pcm-play");
         return PCM_PLAYBACK_SPEAKER_FAILED;
     }
 
@@ -325,6 +350,8 @@ PcmPlaybackResult startPcmPlayback(uint8_t* pcmData, size_t pcmSize, const Strin
     Serial.printf("[PCM] Speaker started: session=%s bytes=%u final=%s queue=%u @ 24kHz mono s16le\n",
                   sessionId.c_str(), (unsigned)pcmSize,
                   finalSegment ? "true" : "false", (unsigned)s_pcmQueuedBytes);
+    logAudioMemory("pcm-start");
+    audioGateLeave("pcm-play");
     return PCM_PLAYBACK_OK;
 }
 
@@ -442,6 +469,7 @@ static void notifyPlaybackFinished() {
     s_isPlaying = false;
     retireCurrentPlaybackBuffer();
     setMouthOpen(0.0f);
+    logAudioMemory("play-finish");
     processAudioQueue();
 
     if (!s_isPlaying) {
@@ -459,7 +487,12 @@ void updatePlayback() {
          (s_playbackDeadlineMs != 0 && millis() > s_playbackDeadlineMs))) {
         if (s_playbackDeadlineMs != 0 && millis() > s_playbackDeadlineMs) {
             Serial.println("[PLAY] Playback timeout -> force stop");
-            M5.Speaker.stop();
+            if (audioGateEnter("play-stop", 200)) {
+                M5.Speaker.stop();
+                audioGateLeave("play-stop");
+            } else {
+                Serial.println("[PLAY] Audio gate busy; skipped forced speaker stop");
+            }
             clearQueuedPcmPlayback();
         }
         notifyPlaybackFinished();

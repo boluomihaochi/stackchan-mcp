@@ -7,6 +7,7 @@
 #include "http_server.h"
 #include "recording_store.h"
 #include "playback_service.h"
+#include "audio_gate.h"
 
 enum MicState {
     MIC_IDLE = 0,
@@ -116,14 +117,21 @@ bool initMicrophone() {
     pre_buf_write = 0;
     pre_buf_full  = false;
 
+    bool mic_started = false;
+    if (!audioGateEnter("mic-init", 1000)) {
+        Serial.println("[MIC] Audio gate busy; init skipped");
+        return false;
+    }
     if (M5.Speaker.isRunning()) {
         M5.Speaker.end();
-        vTaskDelay(pdMS_TO_TICKS(500)); 
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
-    
-    applyMicConfig();
 
-    if (!M5.Mic.begin()) {
+    applyMicConfig();
+    mic_started = M5.Mic.begin();
+    audioGateLeave("mic-init");
+
+    if (!mic_started) {
         Serial.println("[MIC] Mic.begin failed");
         return false;
     }
@@ -133,12 +141,17 @@ bool initMicrophone() {
         record_buffer = (int16_t*)ps_malloc(max_samples * sizeof(int16_t));
         if (!record_buffer) {
             Serial.println("[MIC] Failed to allocate record buffer");
+            if (audioGateEnter("mic-alloc-fail", 1000)) {
+                M5.Mic.end();
+                audioGateLeave("mic-alloc-fail");
+            }
             return false;
         }
     }
 
     Serial.printf("[MIC] Ready sr=%d maxSec=%d maxSamples=%u\n",
                   MIC_SAMPLE_RATE, MIC_MAX_RECORD_SECONDS, (unsigned)max_samples);
+    logAudioMemory("mic-ready");
     mic_state = MIC_IDLE;
 
     return true;
@@ -146,10 +159,14 @@ bool initMicrophone() {
 
 void updateMicrophone() {
     if (!M5.Mic.isEnabled()) return;
+    if (!record_buffer) return;
     if (isPlaybackActive()) return;
 
     static int16_t frame[MIC_FRAME_SAMPLES];
-    if (!M5.Mic.record(frame, MIC_FRAME_SAMPLES, MIC_SAMPLE_RATE)) return;
+    if (!audioGateEnter("mic-record", 0)) return;
+    bool recorded = M5.Mic.record(frame, MIC_FRAME_SAMPLES, MIC_SAMPLE_RATE);
+    audioGateLeave("mic-record");
+    if (!recorded) return;
     size_t got = MIC_FRAME_SAMPLES;
 
     float rms = calcRmsNorm(frame, got);
@@ -250,6 +267,7 @@ static bool storeRecordingForMcp(int16_t* audio_data, size_t sample_count) {
 
     storeLastRecording(wav, wav_size);
     free(wav);
+    logAudioMemory("mic-store");
     setFaceExpression(FACE_IDLE);
     return true;
 }

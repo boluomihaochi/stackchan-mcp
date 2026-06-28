@@ -12,6 +12,7 @@
 #include "face_service.h"
 #include "servo_service.h"
 #include "camera_service.h"
+#include "audio_gate.h"
 
 void setup() {
     Serial.begin(115200);
@@ -19,6 +20,7 @@ void setup() {
 
     M5StackChan.begin();
     M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
+    initAudioGate();
 
     initFace();
 
