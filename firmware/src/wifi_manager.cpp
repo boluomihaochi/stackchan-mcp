@@ -3,7 +3,7 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include "wifi_manager.h"
-#include "config.h"
+#include "config_loader.h"
 
 // ネットワーク定義（config.h の定数を配列にまとめる）
 struct NetworkConfig {

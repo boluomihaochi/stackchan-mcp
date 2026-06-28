@@ -28,6 +28,10 @@
 #define MIC_VOICE_CONFIRM_RMS     0.004f
 #define PRE_TRIGGER_BUFFER_SAMPLES 4800
 
+// マイク追加設定
+#define MIC_MAGNIFICATION         2
+#define MIC_NOISE_FILTER_LEVEL    1
+
 // HTTP タイムアウト (ms)
 #define HTTP_TIMEOUT_CHAT     30000
 #define HTTP_TIMEOUT_SHORT     5000

@@ -3,7 +3,7 @@
 #include <queue>
 #include "playback_service.h"
 #include "audio_download.h"
-#include "config.h"
+#include "config_loader.h"
 #include "face_service.h"
 #include "wav_parser.h"
 #include "audio_gate.h"

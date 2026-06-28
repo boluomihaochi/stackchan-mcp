@@ -5,7 +5,7 @@
 #include <WiFi.h>
 #include "http_server.h"
 #include "types.h"
-#include "config.h"
+#include "config_loader.h"
 #include "mic_service.h"
 #include "wifi_manager.h"
 #include "playback_service.h"

@@ -1,7 +1,7 @@
 #include <M5Unified.h>
 
 #include "mic_service.h"
-#include "config.h"
+#include "config_loader.h"
 #include "types.h"
 #include "face_service.h"
 #include "http_server.h"
