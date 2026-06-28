@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def load_dotenv(path: Path | None = None) -> None:
     """Load project .env so launchd and direct shell starts share one config."""
-    env_path = path or (Path.cwd() / ".env")
+    env_path = path or (Path(__file__).resolve().parents[1] / ".env")
     if not env_path.exists():
         return
     try:
