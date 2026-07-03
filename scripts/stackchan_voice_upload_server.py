@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -91,7 +91,8 @@ def write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, 
 
 def send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
     origin = handler.headers.get("Origin", "")
-    allowed = getattr(handler.server.options, "allowed_origins", ())
+    server = cast(VoiceUploadServer, handler.server)
+    allowed = server.options.allowed_origins
     if origin and origin in allowed:
         handler.send_header("Access-Control-Allow-Origin", origin)
         handler.send_header("Vary", "Origin")
@@ -473,29 +474,39 @@ class VoiceUploadServer(ThreadingHTTPServer):
 
 
 class VoiceUploadHandler(BaseHTTPRequestHandler):
-    server: VoiceUploadServer
+    @property
+    def voice_server(self) -> VoiceUploadServer:
+        return cast(VoiceUploadServer, self.server)
 
-    def log_message(self, fmt: str, *args) -> None:
-        message = TOKEN_QUERY_RE.sub(r"\1<redacted>", fmt % args)
+    def log_message(self, format: str, *args: Any) -> None:
+        message = TOKEN_QUERY_RE.sub(r"\1<redacted>", format % args)
         print(f"[voice-upload] {self.address_string()} - {message}", flush=True)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/" or path == "/recorder":
-            write_html(self, 200, build_recorder_page(self.server.options))
+            write_html(self, 200, build_recorder_page(self.voice_server.options))
             return
         if path == "/health":
-            write_json(self, 200, build_health_payload(self.server.options))
+            write_json(self, 200, build_health_payload(self.voice_server.options))
             return
         write_json(self, 404, {"ok": False, "error": "not found"})
 
     def do_HEAD(self) -> None:
         path = urlparse(self.path).path
         if path == "/" or path == "/recorder":
-            send_html_headers(self, 200, len(build_recorder_page(self.server.options).encode("utf-8")))
+            send_html_headers(
+                self,
+                200,
+                len(build_recorder_page(self.voice_server.options).encode("utf-8")),
+            )
             return
         if path == "/health":
-            send_json_headers(self, 200, json_content_length(build_health_payload(self.server.options)))
+            send_json_headers(
+                self,
+                200,
+                json_content_length(build_health_payload(self.voice_server.options)),
+            )
             return
         send_json_headers(self, 404, json_content_length({"ok": False, "error": "not found"}))
 
@@ -511,14 +522,14 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         if path != "/voice/upload":
             write_json(self, 404, {"ok": False, "error": "not found"})
             return
-        if not self.server.rate_limiter.allow(self.client_address[0]):
+        if not self.voice_server.rate_limiter.allow(self.client_address[0]):
             write_rate_limit_error(self)
             return
         if not self.is_upload_authorized():
             write_json(self, 401, {"ok": False, "error": "unauthorized"})
             return
 
-        if not self.server.config.fish_audio_key:
+        if not self.voice_server.config.fish_audio_key:
             write_json(
                 self,
                 503,
@@ -537,7 +548,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         if content_length <= 0:
             write_json(self, 400, {"ok": False, "error": "empty audio body"})
             return
-        if content_length > self.server.options.max_bytes:
+        if content_length > self.voice_server.options.max_bytes:
             write_json(self, 413, {"ok": False, "error": "audio payload too large"})
             return
 
@@ -549,14 +560,14 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         try:
             event = process_uploaded_wav(
                 audio_data,
-                self.server.config,
-                lang=self.server.options.lang,
+                self.voice_server.config,
+                lang=self.voice_server.options.lang,
             )
         except Exception as exc:
             write_json(self, 500, {"ok": False, "error": str(exc)})
             return
 
-        inbox_path = self.server.options.inbox_path
+        inbox_path = self.voice_server.options.inbox_path
         appended_to_inbox = False
         if inbox_path is not None and should_append_to_inbox(event):
             append_event(event, inbox_path)
@@ -564,17 +575,17 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
 
         frontend = forward_to_frontend(
             event,
-            wake_url=self.server.options.wake_url,
-            session_id=self.server.options.wake_session_id,
-            token=self.server.options.wake_token,
-            model=self.server.options.wake_model,
-            timeout=self.server.options.wake_timeout,
-            retries=self.server.options.wake_retries,
-            retry_delay=self.server.options.wake_retry_delay,
-            force=self.server.options.wake_force,
-            quiet_minutes=self.server.options.wake_quiet_minutes,
-            prompt_prefix=self.server.options.prompt_prefix,
-            wake_words=self.server.options.wake_words,
+            wake_url=self.voice_server.options.wake_url,
+            session_id=self.voice_server.options.wake_session_id,
+            token=self.voice_server.options.wake_token,
+            model=self.voice_server.options.wake_model,
+            timeout=self.voice_server.options.wake_timeout,
+            retries=self.voice_server.options.wake_retries,
+            retry_delay=self.voice_server.options.wake_retry_delay,
+            force=self.voice_server.options.wake_force,
+            quiet_minutes=self.voice_server.options.wake_quiet_minutes,
+            prompt_prefix=self.voice_server.options.prompt_prefix,
+            wake_words=self.voice_server.options.wake_words,
         )
 
         write_json(
@@ -589,7 +600,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         )
 
     def is_upload_authorized(self) -> bool:
-        return is_upload_authorized(self.path, self.headers, self.server.options.upload_token)
+        return is_upload_authorized(self.path, self.headers, self.voice_server.options.upload_token)
 
 
 def build_parser() -> argparse.ArgumentParser:

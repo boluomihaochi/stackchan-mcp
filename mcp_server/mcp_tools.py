@@ -164,7 +164,7 @@ def register_tools(mcp, client: StackchanClient, config: StackchanConfig, image_
             return f"❌ Error: {exc}"
 
     @mcp.tool()
-    def stackchan_see() -> list:
+    def stackchan_see() -> list[object] | str:
         try:
             jpeg_data, size = client.snapshot()
             if jpeg_data is None:

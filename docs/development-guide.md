@@ -91,6 +91,7 @@ Python host tooling uses `ruff` and `pytest` through `uv`:
 
 ```sh
 uv run ruff check .
+uv run pyright
 uv run pytest
 ```
 
@@ -116,7 +117,7 @@ Use this matrix when choosing what to run:
 
 | Change type | Minimum check | Broader handoff check |
 | --- | --- | --- |
-| Python or MCP server only | `uv run ruff check .` and `uv run pytest` | `make lint` |
+| Python or MCP server only | `uv run ruff check .`, `uv run pyright`, and `uv run pytest` | `make lint` |
 | MCP tool behavior or guardrails | `make test-mcp` | `make lint` and `make test` |
 | Firmware only | `cd firmware && pio run` | `make lint` and `make test` |
 | HTTP contract shared by firmware and MCP | `uv run pytest` and `cd firmware && pio run` | `make lint` and `make test` |
@@ -125,6 +126,10 @@ Use this matrix when choosing what to run:
 The Python tooling is declared in `pyproject.toml`, locked by `uv.lock`, and
 can also be installed with `requirements-dev.txt` for environments that do not
 use `uv`.
+
+`pyright` runs in basic mode against `mcp_server/` and `scripts/`. Coverage is
+reported for the same host-side modules during `make test`, but there is no hard
+coverage threshold yet.
 
 `pio check` is intentionally configured as a high-severity gate. Cppcheck emits
 medium/low warnings from bundled libraries and legacy SCServo driver code, so

@@ -6,6 +6,7 @@ cd "$repo_root"
 
 echo "Running fast Stack-chan pre-commit checks..."
 uv run ruff check .
+uv run pyright
 uv run pytest tests/test_mcp_server.py
 
 if [ "${STACKCHAN_HOOK_FULL:-0}" = "1" ]; then

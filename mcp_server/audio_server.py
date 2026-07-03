@@ -1,6 +1,6 @@
 import logging
 import threading
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 logger = logging.getLogger(__name__)

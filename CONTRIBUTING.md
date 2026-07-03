@@ -11,7 +11,7 @@ handoff.
 
 | Change type | Minimum check | Broader handoff check |
 | --- | --- | --- |
-| Python or MCP server only | `uv run ruff check .` and `uv run pytest` | `make lint` |
+| Python or MCP server only | `uv run ruff check .`, `uv run pyright`, and `uv run pytest` | `make lint` |
 | MCP tool behavior or guardrails | `make test-mcp` | `make lint` and `make test` |
 | Firmware only | `cd firmware && pio run -e m5stack-cores3` | `make lint` and `make test` |
 | Firmware parser or utility code | `cd firmware && pio test -e native` | `cd firmware && pio run -e m5stack-cores3` |
@@ -21,9 +21,13 @@ handoff.
 The GitHub Actions workflow runs the host Python checks plus firmware native
 tests, CoreS3 build, and high-severity `pio check`.
 
-There is no dedicated Python typechecker gate yet. Ruff covers syntax, imports,
-bugbear, modernization, and simplification checks; add mypy/pyright only in a
-separate PR that fixes the baseline without mixing behavior changes.
+Python type checking uses `pyright` in basic mode for `mcp_server/` and
+`scripts/`. Tests intentionally stay outside the typecheck gate so local fake
+clients can remain lightweight.
+
+Python tests report coverage for `mcp_server/` and `scripts/`. Coverage is
+reported as visibility, not as a hard threshold, until the important host-side
+paths have a stronger baseline.
 
 Ruff formatting is available with `uv run ruff format .`, but formatter checks
 are not a CI gate until the existing baseline is normalized. If you run the

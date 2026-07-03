@@ -32,8 +32,11 @@ jobs:
       - name: Lint Python
         run: uv run --locked ruff check .
 
+      - name: Type check Python
+        run: uv run --locked pyright
+
       - name: Run Python tests
-        run: uv run --locked pytest
+        run: uv run --locked pytest --cov=mcp_server --cov=scripts --cov-report=term-missing
 
   firmware:
     name: Firmware build and checks

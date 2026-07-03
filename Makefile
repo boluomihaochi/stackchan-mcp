@@ -1,9 +1,12 @@
-.PHONY: lint lint-python lint-firmware test test-python test-mcp mcp-test test-firmware-cpp build-firmware
+.PHONY: lint lint-python typecheck-python lint-firmware test test-python test-mcp mcp-test test-firmware-cpp build-firmware
 
-lint: lint-python lint-firmware
+lint: lint-python typecheck-python lint-firmware
 
 lint-python:
 	uv run ruff check .
+
+typecheck-python:
+	uv run pyright
 
 lint-firmware:
 	cd firmware && pio check -e m5stack-cores3 --severity=high --fail-on-defect=high
@@ -11,7 +14,7 @@ lint-firmware:
 test: test-python test-firmware-cpp build-firmware
 
 test-python:
-	uv run pytest
+	uv run pytest --cov=mcp_server --cov=scripts --cov-report=term-missing
 
 test-mcp:
 	uv run pytest tests/test_mcp_server.py
