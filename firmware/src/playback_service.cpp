@@ -88,6 +88,15 @@ static void releaseRetiredPlaybackBuffer() {
     if (!s_retiredPlaybackData) {
         return;
     }
+    // playRaw() does NOT copy: the DMA reads our buffer directly and may
+    // still be draining the tail after isPlaying() reports false. Freeing at
+    // that moment caused LoadProhibited panics (use-after-free) — observed
+    // via serial capture on 2026-07-03. Stop the channel and give the driver
+    // a beat before freeing.
+    if (M5.Speaker.isPlaying(SPEAKER_PLAYBACK_CHANNEL)) {
+        M5.Speaker.stop(SPEAKER_PLAYBACK_CHANNEL);
+    }
+    vTaskDelay(pdMS_TO_TICKS(60));
     Serial.printf("[PLAY] Releasing retired playback buffer: bytes=%u\n",
                   (unsigned)s_retiredPlaybackSize);
     free(s_retiredPlaybackData);
