@@ -55,7 +55,7 @@
   PCM queue work remains.
 - On playback completion, firmware now synchronously ends the M5Unified speaker
   task/I2S path before freeing the buffer and starting the next queued item.
-- The logical WAV queue is capped at 8 pending items; additional `/play`
+- The logical WAV queue is capped at 16 pending items; additional `/play`
   requests return `503 {"success":false,"error":"play queue full"}`.
 - Queued WAV items retain priority ordering, and same-priority items use an
   internal sequence number so consecutive normal-priority speech remains FIFO.

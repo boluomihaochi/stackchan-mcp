@@ -245,7 +245,7 @@ For lower latency speech, firmware also accepts `POST /play/pcm` with raw PCM:
 - WAV playback treats an active device-side download as a pending playback, so
   additional `/play` requests are held in the logical audio queue instead of
   being dropped by the lower-level download queue.
-- The logical WAV queue accepts up to 8 pending items. Additional `/play`
+- The logical WAV queue accepts up to 16 pending items. Additional `/play`
   requests return `503 {"success":false,"error":"play queue full"}`.
 - Queued WAV items keep priority ordering; items with the same priority are
   played FIFO by an internal sequence number.

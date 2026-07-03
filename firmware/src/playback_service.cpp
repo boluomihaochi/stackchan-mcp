@@ -38,7 +38,7 @@ static uint32_t s_nextAudioSequence = 0;
 #define MAX_PCM_BYTES         (2 * 1024 * 1024)
 #define MAX_QUEUED_PCM_BYTES  (2 * 1024 * 1024)
 #define SPEAKER_PLAYBACK_CHANNEL 0
-#define MAX_AUDIO_QUEUE_DEPTH 8
+#define MAX_AUDIO_QUEUE_DEPTH 16
 
 // ── FreeRTOS: URLをCore 0に渡すキュー
 //    StringはFreeRTOSキューに乗せられないのでchar配列で渡す
