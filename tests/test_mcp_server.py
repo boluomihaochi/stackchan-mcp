@@ -1,10 +1,13 @@
+import asyncio
 import importlib.util
+import json
 import os
 import struct
 import sys
 import types
 import wave
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,7 +16,12 @@ from mcp_server.audio_server import audio_url
 from mcp_server.listening import capture_ready_recording, format_listen_result
 from mcp_server.mcp_tools import can_stream_pcm, register_tools
 from mcp_server.stackchan_client import PcmPlaybackError, StackchanClient, post_pcm_stream
-from mcp_server.stackchan_config import PCM_SAMPLE_WIDTH, StackchanConfig, load_config
+from mcp_server.stackchan_config import (
+    PCM_SAMPLE_WIDTH,
+    PCM_SEGMENT_BYTES,
+    StackchanConfig,
+    load_config,
+)
 from mcp_server.voice_inbox import append_event, clear_events, format_events, read_events
 from scripts import (
     stackchan_frontend_session,
@@ -29,13 +37,18 @@ from scripts.stackchan_voice_bridge import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def isolate_telemetry_log(monkeypatch, tmp_path):
+    monkeypatch.setenv("STACKCHAN_OTEL_LOG", str(tmp_path / "otel.jsonl"))
+
+
 class FakeFastMCP:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
         self.tools = {}
 
-    def tool(self):
+    def tool(self, **kwargs):
         def decorator(func):
             self.tools[func.__name__] = func
             return func
@@ -57,8 +70,22 @@ def make_config(**overrides):
         "save_pcm": False,
         "pcm_gain": 0.75,
         "pcm_limit": 0.90,
+        "pcm_segment_bytes": PCM_SEGMENT_BYTES,
+        "max_pcm_payload_bytes": 2 * 1024 * 1024,
         "pcm_declick_samples": 64,
         "pcm_zero_cross_window": 256,
+        "http_play_timeout": 5.0,
+        "http_audio_timeout": 10.0,
+        "http_status_timeout": 3.0,
+        "http_command_timeout": 5.0,
+        "http_snapshot_warmup_timeout": 5.0,
+        "http_snapshot_timeout": 10.0,
+        "playback_start_timeout": 5.0,
+        "playback_poll_interval": 0.2,
+        "pcm_segment_post_timeout": 30.0,
+        "fish_tts_timeout": 30.0,
+        "fish_asr_timeout": 15.0,
+        "fish_stream_chunk_bytes": 4096,
         "edge_tts_bin": "edge-tts",
         "fish_audio_key": "test-key",
         "fish_audio_model_zh": "zh-model",
@@ -81,6 +108,20 @@ def write_wav(
         wav.setframerate(sample_rate)
         wav.setsampwidth(sample_width)
         wav.writeframes(frames)
+
+
+def mcp_json_payload(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, list | tuple):
+        return [mcp_json_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: mcp_json_payload(item) for key, item in value.items()}
+    return value
+
+
+def assert_mcp_json_serializable(value: Any) -> None:
+    json.dumps(mcp_json_payload(value))
 
 
 def test_server_entrypoint_registers_expected_tools(monkeypatch):
@@ -112,10 +153,101 @@ def test_server_entrypoint_registers_expected_tools(monkeypatch):
         "stackchan_see",
         "stackchan_home",
         "stackchan_status",
+        "stackchan_health",
+        "stackchan_config_summary",
         "stackchan_playback_status",
         "stackchan_voice_inbox",
         "stackchan_voice_inbox_clear",
     }
+
+
+def test_stackchan_see_returns_fastmcp_serializable_image_content(monkeypatch, tmp_path):
+    from mcp.server.fastmcp import FastMCP, Image
+
+    class FakeClient:
+        def snapshot(self):
+            return b"\xff\xd8fake-jpeg\xff\xd9", 15
+
+    monkeypatch.setattr("mcp_server.mcp_tools.AUDIO_DIR", tmp_path)
+    mcp = FastMCP("stackchan-test")
+    register_tools(mcp, FakeClient(), make_config(), Image)
+
+    tool = mcp._tool_manager.get_tool("stackchan_see")
+    assert tool is not None
+    content = asyncio.run(tool.run({}, convert_result=True))
+
+    assert content[0].type == "image"
+    assert content[0].mimeType == "image/jpeg"
+    assert content[1].type == "text"
+    assert "Photo captured" in content[1].text
+    assert_mcp_json_serializable(content)
+
+
+def test_registered_mcp_tools_return_json_serializable_content(monkeypatch, tmp_path):
+    from mcp.server.fastmcp import FastMCP, Image
+
+    class FakeClient:
+        base_url = "http://192.0.2.20:80"
+
+        def audio_status(self):
+            return {"ready": False, "mode": "mcp"}
+
+        def playback_status(self):
+            return {
+                "kind": "idle",
+                "playing": False,
+                "queued_pcm_segments": 0,
+                "queued_pcm_bytes": 0,
+                "audio_queue_depth": 0,
+                "download_queue_depth": 0,
+                "download_in_flight": False,
+                "mic_state": "idle",
+                "gesture": "none",
+                "free_heap": 123456,
+                "free_psram": 654321,
+            }
+
+        def move(self, x, y, speed):
+            return {"success": True}
+
+        def gesture(self, gesture):
+            return {"success": True}
+
+        def set_face(self, face):
+            return {"success": True}
+
+        def snapshot(self):
+            return b"\xff\xd8contract-jpeg\xff\xd9", 17
+
+        def get_audio(self):
+            raise AssertionError("contract test must not consume GET /audio")
+
+    monkeypatch.setattr("mcp_server.mcp_tools.AUDIO_DIR", tmp_path)
+    monkeypatch.setenv("STACKCHAN_VOICE_INBOX", str(tmp_path / "voice_inbox.jsonl"))
+    mcp = FastMCP("stackchan-contract")
+    register_tools(mcp, FakeClient(), make_config(), Image)
+
+    cases = {
+        "stackchan_listen": {"lang": "zh"},
+        "stackchan_move": {"x": 10, "y": 20, "speed": 30},
+        "stackchan_nod": {},
+        "stackchan_shake": {},
+        "stackchan_face": {"expression": "calm"},
+        "stackchan_see": {},
+        "stackchan_home": {},
+        "stackchan_status": {},
+        "stackchan_health": {},
+        "stackchan_config_summary": {},
+        "stackchan_playback_status": {},
+        "stackchan_voice_inbox": {"limit": 10},
+        "stackchan_voice_inbox_clear": {},
+    }
+
+    for name, arguments in cases.items():
+        tool = mcp._tool_manager.get_tool(name)
+        assert tool is not None, name
+        result = asyncio.run(tool.run(arguments, convert_result=True))
+        assert_mcp_json_serializable(result)
 
 
 def test_audio_url_uses_configured_host_and_port():
@@ -134,6 +266,22 @@ def test_invalid_pcm_env_values_fall_back_to_defaults(monkeypatch):
     assert config.pcm_limit == 0.90
     assert config.pcm_declick_samples == 64
     assert config.pcm_zero_cross_window == 256
+
+
+def test_config_reads_pcm_and_timeout_env_aliases(monkeypatch):
+    monkeypatch.setenv("STACKCHAN_PCM_SEGMENT_BYTES", "32768")
+    monkeypatch.setenv("STACKCHAN_PCM_MAX_PAYLOAD_BYTES", "1048576")
+    monkeypatch.setenv("STACKCHAN_PLAYBACK_START_TIMEOUT_SEC", "7.5")
+    monkeypatch.setenv("STACKCHAN_PCM_SEGMENT_POST_TIMEOUT_SEC", "22")
+    monkeypatch.setenv("STACKCHAN_FISH_STREAM_CHUNK_BYTES", "8192")
+
+    config = load_config()
+
+    assert config.pcm_segment_bytes == 32768
+    assert config.max_pcm_payload_bytes == 1048576
+    assert config.playback_start_timeout == 7.5
+    assert config.pcm_segment_post_timeout == 22
+    assert config.fish_stream_chunk_bytes == 8192
 
 
 def test_voice_bridge_env_loader_does_not_override_existing_values(monkeypatch, tmp_path):
@@ -177,7 +325,9 @@ def test_voice_bridge_only_appends_non_empty_transcripts_to_inbox():
     assert not should_append_to_inbox({"type": "idle", "text": "小记，你好。"})
 
 
-def test_voice_upload_processes_wav_into_transcript_event(tmp_path):
+def test_voice_upload_processes_wav_into_transcript_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("STACKCHAN_OTEL_LOG", str(tmp_path / "otel.jsonl"))
+
     def fake_transcribe(wav_path, lang, config):
         assert wav_path.read_bytes() == b"RIFF-upload-wav"
         assert lang == "zh"
@@ -194,11 +344,16 @@ def test_voice_upload_processes_wav_into_transcript_event(tmp_path):
 
     assert event["type"] == "transcript"
     assert event["source"] == "voice_upload"
+    assert event["request_id"]
     assert event["text"] == "从上传来的声音"
     assert event["duration"] == 2.5
     assert event["detected_language"] == "zh"
     assert event["audio_bytes"] == len(b"RIFF-upload-wav")
+    assert set(event["timing_ms"]) == {"upload_save", "asr", "process_total"}
     assert Path(event["wav_path"]).exists()
+    records = [json.loads(line) for line in (tmp_path / "otel.jsonl").read_text().splitlines()]
+    assert records[-1]["event_name"] == "stackchan.voice.asr.completed"
+    assert records[-1]["attributes"]["stackchan.request_id"] == event["request_id"]
 
 
 def test_voice_upload_requires_fish_key_before_processing(tmp_path):
@@ -217,7 +372,9 @@ def test_voice_upload_frontend_forwarding_skips_without_config():
         session_id="",
     )
 
-    assert result == {"ok": False, "skipped": "frontend wake not configured"}
+    assert result["ok"] is False
+    assert result["skipped"] == "frontend wake not configured"
+    assert "wake_total" in result["timing_ms"]
 
 
 def test_voice_upload_recorder_page_exposes_upload_ui():
@@ -239,6 +396,7 @@ def test_voice_upload_recorder_page_exposes_upload_ui():
             wake_words=("小塔", "机器人"),
             upload_token="secret-token-for-test",
             upload_rate_per_minute=12,
+            upload_rate_window_seconds=60,
             allowed_origins=(),
         )
     )
@@ -341,11 +499,10 @@ def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
         wake_words=("小塔", "机器人"),
     )
 
-    assert result == {
-        "ok": False,
-        "skipped": "wake word not found",
-        "wake_words": ["小塔", "机器人"],
-    }
+    assert result["ok"] is False
+    assert result["skipped"] == "wake word not found"
+    assert result["wake_words"] == ["小塔", "机器人"]
+    assert "wake_total" in result["timing_ms"]
 
 
 def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
@@ -376,6 +533,7 @@ def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
 
     assert result["ok"] is True
     assert result["wake_word"] == "小塔"
+    assert set(result["timing_ms"]) == {"wake_post", "wake_total"}
     assert calls == [
         {
             "url": "http://127.0.0.1:3200/wake",
@@ -429,7 +587,11 @@ def test_voice_upload_frontend_forwarding_retries_busy(monkeypatch):
         retry_delay=0.1,
     )
 
-    assert result == {"ok": True, "status_code": 200, "attempts": 2, "body": {"ok": True}}
+    assert result["ok"] is True
+    assert result["status_code"] == 200
+    assert result["attempts"] == 2
+    assert result["body"] == {"ok": True}
+    assert set(result["timing_ms"]) == {"wake_post", "wake_total"}
     assert len(calls) == 2
 
 
@@ -626,6 +788,7 @@ def test_post_pcm_stream_posts_binary_payload_with_content_length(monkeypatch, t
 
     assert result["success"] is True
     assert result["segments"] == 1
+    assert set(result["timing_ms"]) == {"pcm_total", "fish_first_chunk", "first_segment_posted"}
     assert request_kwargs["kwargs"]["data"] == struct.pack("<hh", 750, -750)
     assert isinstance(request_kwargs["kwargs"]["data"], bytes)
     headers = request_kwargs["kwargs"]["headers"]
@@ -729,6 +892,30 @@ def test_listen_does_not_consume_audio_when_not_ready():
     register_tools(mcp, FakeClient(), make_config(), lambda data, format: {"data": data, "format": format})
 
     assert "No recording ready" in mcp.tools["stackchan_listen"]()
+
+
+def test_health_check_is_non_destructive():
+    class FakeClient:
+        base_url = "http://192.0.2.20:80"
+
+        def audio_status(self):
+            return {"ready": True, "mode": "mcp"}
+
+        def playback_status(self):
+            return {"playing": False, "kind": "idle"}
+
+        def get_audio(self):
+            raise AssertionError("health check must not consume GET /audio")
+
+    mcp = FakeFastMCP()
+    register_tools(mcp, FakeClient(), make_config(), lambda data, format: {"data": data, "format": format})
+
+    report = json.loads(mcp.tools["stackchan_health"]())
+
+    assert report["ok"] is True
+    assert report["device"]["audio_status"]["ready"] is True
+    assert report["device"]["playback_status"]["playing"] is False
+    assert report["config"]["pcm"]["segment_bytes"] == PCM_SEGMENT_BYTES
 
 
 def test_capture_ready_recording_does_not_consume_audio_when_not_ready(tmp_path):

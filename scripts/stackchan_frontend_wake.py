@@ -5,6 +5,8 @@ from typing import Any
 
 import requests
 
+from mcp_server.telemetry import emit_event, new_request_id
+
 DEFAULT_PROMPT_PREFIX = "[Stack-chan语音输入] "
 LEADING_FILLERS = (
     "好的",
@@ -81,15 +83,54 @@ def forward_to_frontend(
     quiet_minutes: int = 0,
     prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
     wake_words: tuple[str, ...] = (),
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
+    request_id = request_id or str(event.get("request_id") or "") or new_request_id()
     text = str(event.get("text") or "").strip()
     if not text:
-        return {"ok": False, "skipped": "empty transcript"}
+        result = {"ok": False, "skipped": "empty transcript", "timing_ms": {"wake_total": 0}}
+        emit_event(
+            "stackchan.voice.wake.skipped",
+            body="Wake forwarding skipped: empty transcript",
+            request_id=request_id,
+            attributes={"stackchan.wake.skipped": "empty transcript"},
+        )
+        return result
     matched, prompt_text, matched_word = match_wake_word(text, wake_words)
     if not matched:
-        return {"ok": False, "skipped": "wake word not found", "wake_words": list(wake_words)}
+        result = {
+            "ok": False,
+            "skipped": "wake word not found",
+            "wake_words": list(wake_words),
+            "timing_ms": {"wake_total": round((time.perf_counter() - started) * 1000)},
+        }
+        emit_event(
+            "stackchan.voice.wake.skipped",
+            body="Wake forwarding skipped: wake word not found",
+            request_id=request_id,
+            attributes={
+                "stackchan.wake.skipped": "wake word not found",
+                "stackchan.latency.wake_total_ms": result["timing_ms"]["wake_total"],
+            },
+        )
+        return result
     if not wake_url or not session_id:
-        return {"ok": False, "skipped": "frontend wake not configured"}
+        result = {
+            "ok": False,
+            "skipped": "frontend wake not configured",
+            "timing_ms": {"wake_total": round((time.perf_counter() - started) * 1000)},
+        }
+        emit_event(
+            "stackchan.voice.wake.skipped",
+            body="Wake forwarding skipped: frontend wake not configured",
+            request_id=request_id,
+            attributes={
+                "stackchan.wake.skipped": "frontend wake not configured",
+                "stackchan.latency.wake_total_ms": result["timing_ms"]["wake_total"],
+            },
+        )
+        return result
 
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -107,15 +148,41 @@ def forward_to_frontend(
     attempts = max(0, int(retries)) + 1
     last_result: dict[str, Any] | None = None
     for attempt in range(1, attempts + 1):
+        post_started = time.perf_counter()
         try:
             response = requests.post(wake_url, json=payload, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
-            return {"ok": False, "attempts": attempt, "error": str(exc)}
+            result = {
+                "ok": False,
+                "attempts": attempt,
+                "error": str(exc),
+                "timing_ms": {
+                    "wake_post": round((time.perf_counter() - post_started) * 1000),
+                    "wake_total": round((time.perf_counter() - started) * 1000),
+                },
+            }
+            emit_event(
+                "stackchan.voice.wake.failed",
+                body="Wake forwarding request failed",
+                severity_text="ERROR",
+                request_id=request_id,
+                attributes={
+                    "stackchan.error": str(exc),
+                    "stackchan.wake.attempts": attempt,
+                    "stackchan.latency.wake_post_ms": result["timing_ms"]["wake_post"],
+                    "stackchan.latency.wake_total_ms": result["timing_ms"]["wake_total"],
+                },
+            )
+            return result
 
         result: dict[str, Any] = {
             "ok": 200 <= response.status_code < 300,
             "status_code": response.status_code,
             "attempts": attempt,
+            "timing_ms": {
+                "wake_post": round((time.perf_counter() - post_started) * 1000),
+                "wake_total": round((time.perf_counter() - started) * 1000),
+            },
         }
         try:
             result["body"] = response.json()
@@ -124,6 +191,18 @@ def forward_to_frontend(
         if result["ok"]:
             if matched_word:
                 result["wake_word"] = matched_word
+            emit_event(
+                "stackchan.voice.wake.forwarded",
+                body="Wake forwarded to frontend",
+                request_id=request_id,
+                attributes={
+                    "stackchan.wake.word": matched_word,
+                    "stackchan.wake.attempts": attempt,
+                    "http.response.status_code": response.status_code,
+                    "stackchan.latency.wake_post_ms": result["timing_ms"]["wake_post"],
+                    "stackchan.latency.wake_total_ms": result["timing_ms"]["wake_total"],
+                },
+            )
             return result
         last_result = result
         if response.status_code != 409 or attempt >= attempts:
@@ -133,4 +212,16 @@ def forward_to_frontend(
     result = last_result or {"ok": False, "error": "frontend wake failed without response"}
     if matched_word:
         result["wake_word"] = matched_word
+    emit_event(
+        "stackchan.voice.wake.failed",
+        body="Wake forwarding was rejected by frontend",
+        severity_text="WARN",
+        request_id=request_id,
+        attributes={
+            "stackchan.wake.word": matched_word,
+            "stackchan.wake.attempts": result.get("attempts"),
+            "http.response.status_code": result.get("status_code"),
+            "stackchan.latency.wake_total_ms": result.get("timing_ms", {}).get("wake_total"),
+        },
+    )
     return result

@@ -1,6 +1,13 @@
 # stackchan-mcp
 
 [![CI](https://github.com/migratorywhale/stackchan-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/migratorywhale/stackchan-mcp/actions/workflows/ci.yml)
+![MCP](https://img.shields.io/badge/MCP-server-5d5bd6)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776ab)
+![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-f5822a)
+[![Claude Code](https://img.shields.io/badge/connect-Claude%20Code-5d5bd6)](docs/mcp-client-setup.md#claude-code-stdio-local)
+[![Claude Desktop](https://img.shields.io/badge/connect-Claude%20Desktop-6b5cff)](docs/mcp-client-setup.md#claude-desktop-local)
+[![ChatGPT](https://img.shields.io/badge/connect-ChatGPT%20MCP-10a37f)](docs/mcp-client-setup.md#chatgpt-remote-mcp)
+[![Cursor / Windsurf](https://img.shields.io/badge/connect-Cursor%20%2F%20Windsurf-333333)](docs/mcp-client-setup.md#cursor-and-windsurf)
 
 Give your AI a body. This is a bridge between Claude (or any MCP-compatible AI) and [Stack-chan](https://github.com/m5stack/StackChan), the open-source robot built on M5Stack CoreS3.
 
@@ -77,24 +84,38 @@ For local secrets and host-specific values, copy `.env.example` to `.env` and
 edit the copy. `.env` is gitignored; do not commit API keys, upload tokens,
 frontend session ids, or local network addresses that should stay private.
 
-### 4. Register with Claude Code
+### 4. Connect an MCP client
 
-Add to `~/.claude.json`:
+Use the client setup guide for copy-paste configs:
+
+- [Claude Code stdio](docs/mcp-client-setup.md#claude-code-stdio-local)
+- [Claude Desktop local](docs/mcp-client-setup.md#claude-desktop-local)
+- [ChatGPT remote MCP](docs/mcp-client-setup.md#chatgpt-remote-mcp)
+- [Cursor and Windsurf](docs/mcp-client-setup.md#cursor-and-windsurf)
+
+For local stdio clients, the basic MCP server entry is:
 
 ```json
 {
   "mcpServers": {
     "stackchan": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "mcp_server.server"],
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_server.server"],
+      "cwd": "/absolute/path/to/stackchan",
       "env": {
+        "STACKCHAN_IP": "192.0.2.20",
+        "MAC_IP": "192.0.2.10",
         "FISH_AUDIO_KEY": "your_key_here"
       }
     }
   }
 }
 ```
+
+Claude Desktop-style one-click install is a good future fit via `.mcpb`, but it
+is not published yet because this server currently depends on a local Python/uv
+environment and hardware-specific `.env` values.
 
 ### 5. Run (HTTP mode for Chat/Cowork)
 

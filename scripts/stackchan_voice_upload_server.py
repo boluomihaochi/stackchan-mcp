@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp_server import audio_processing  # noqa: E402
 from mcp_server.audio_server import AUDIO_DIR  # noqa: E402
 from mcp_server.stackchan_config import StackchanConfig, load_config  # noqa: E402
+from mcp_server.telemetry import emit_event, new_request_id  # noqa: E402
 from mcp_server.voice_inbox import append_event, resolve_inbox_path  # noqa: E402
 from scripts.stackchan_frontend_wake import (  # noqa: E402
     DEFAULT_PROMPT_PREFIX,
@@ -34,6 +35,7 @@ from scripts.stackchan_voice_bridge import load_env_file, should_append_to_inbox
 
 DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 DEFAULT_UPLOAD_RATE_PER_MINUTE = 12
+DEFAULT_UPLOAD_RATE_WINDOW_SECONDS = 60.0
 TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^\s&]+")
 
 
@@ -55,12 +57,14 @@ class ServerOptions:
     wake_words: tuple[str, ...]
     upload_token: str
     upload_rate_per_minute: int
+    upload_rate_window_seconds: float
     allowed_origins: tuple[str, ...]
 
 
 class UploadRateLimiter:
-    def __init__(self, limit_per_minute: int):
+    def __init__(self, limit_per_minute: int, *, window_seconds: float = DEFAULT_UPLOAD_RATE_WINDOW_SECONDS):
         self.limit_per_minute = limit_per_minute
+        self.window_seconds = max(1.0, window_seconds)
         self._attempts: defaultdict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
 
@@ -68,7 +72,7 @@ class UploadRateLimiter:
         if self.limit_per_minute <= 0:
             return True
         now = time.monotonic() if now is None else now
-        window_start = now - 60.0
+        window_start = now - self.window_seconds
         with self._lock:
             attempts = self._attempts[client_id]
             while attempts and attempts[0] < window_start:
@@ -399,11 +403,13 @@ def build_transcript_event(
     audio_bytes: int,
     asr_result: dict[str, Any],
     lang: str,
+    request_id: str,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "transcript",
         "source": "voice_upload",
+        "request_id": request_id,
         "timestamp": timestamp or utc_now(),
         "lang": lang,
         "text": asr_result.get("text", ""),
@@ -421,18 +427,44 @@ def process_uploaded_wav(
     lang: str = "zh",
     audio_dir: Path = AUDIO_DIR,
     transcribe_fn=audio_processing.transcribe_audio,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id = request_id or new_request_id()
+    started = time.perf_counter()
     if not config.fish_audio_key:
         raise RuntimeError("Fish Audio key is not configured; set FISH_AUDIO_KEY before uploading audio.")
 
+    save_started = time.perf_counter()
     wav_path = save_uploaded_wav(audio_data, audio_dir)
+    save_ms = round((time.perf_counter() - save_started) * 1000)
+    asr_started = time.perf_counter()
     asr_result = transcribe_fn(wav_path, lang, config)
-    return build_transcript_event(
+    event = build_transcript_event(
         wav_path=wav_path,
         audio_bytes=len(audio_data),
         asr_result=asr_result,
         lang=lang,
+        request_id=request_id,
     )
+    event["timing_ms"] = {
+        "upload_save": save_ms,
+        "asr": round((time.perf_counter() - asr_started) * 1000),
+        "process_total": round((time.perf_counter() - started) * 1000),
+    }
+    emit_event(
+        "stackchan.voice.asr.completed",
+        body="Uploaded voice recording transcribed",
+        request_id=request_id,
+        attributes={
+            "stackchan.lang": lang,
+            "stackchan.audio.bytes": len(audio_data),
+            "stackchan.transcript.length": len(str(event.get("text") or "")),
+            "stackchan.latency.upload_save_ms": event["timing_ms"]["upload_save"],
+            "stackchan.latency.asr_ms": event["timing_ms"]["asr"],
+            "stackchan.latency.process_total_ms": event["timing_ms"]["process_total"],
+        },
+    )
+    return event
 
 
 def is_upload_authorized(path: str, headers: Any, token: str) -> bool:
@@ -451,6 +483,20 @@ def build_health_payload(options: ServerOptions) -> dict[str, Any]:
         "service": "stackchan_voice_upload_server",
         "inbox": str(options.inbox_path) if options.inbox_path else None,
         "frontend": bool(options.wake_url and options.wake_session_id),
+        "config": {
+            "lang": options.lang,
+            "max_bytes": options.max_bytes,
+            "wake_timeout": options.wake_timeout,
+            "wake_retries": options.wake_retries,
+            "wake_retry_delay": options.wake_retry_delay,
+            "wake_force": options.wake_force,
+            "wake_quiet_minutes": options.wake_quiet_minutes,
+            "wake_words": list(options.wake_words),
+            "upload_rate_per_minute": options.upload_rate_per_minute,
+            "upload_rate_window_seconds": options.upload_rate_window_seconds,
+            "upload_token_configured": bool(options.upload_token),
+            "allowed_origins": list(options.allowed_origins),
+        },
     }
 
 
@@ -459,7 +505,8 @@ def write_rate_limit_error(handler: BaseHTTPRequestHandler) -> None:
     handler.send_response(429)
     send_cors_headers(handler)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Retry-After", "60")
+    server = cast(VoiceUploadServer, handler.server)
+    handler.send_header("Retry-After", str(round(server.options.upload_rate_window_seconds)))
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -470,7 +517,10 @@ class VoiceUploadServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
         self.config = config
         self.options = options
-        self.rate_limiter = UploadRateLimiter(options.upload_rate_per_minute)
+        self.rate_limiter = UploadRateLimiter(
+            options.upload_rate_per_minute,
+            window_seconds=options.upload_rate_window_seconds,
+        )
 
 
 class VoiceUploadHandler(BaseHTTPRequestHandler):
@@ -518,6 +568,8 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        request_id = new_request_id()
+        request_started = time.perf_counter()
         path = urlparse(self.path).path
         if path != "/voice/upload":
             write_json(self, 404, {"ok": False, "error": "not found"})
@@ -552,7 +604,9 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
             write_json(self, 413, {"ok": False, "error": "audio payload too large"})
             return
 
+        read_started = time.perf_counter()
         audio_data = self.rfile.read(content_length)
+        read_ms = round((time.perf_counter() - read_started) * 1000)
         if len(audio_data) != content_length:
             write_json(self, 400, {"ok": False, "error": "short audio body"})
             return
@@ -562,6 +616,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
                 audio_data,
                 self.voice_server.config,
                 lang=self.voice_server.options.lang,
+                request_id=request_id,
             )
         except Exception as exc:
             write_json(self, 500, {"ok": False, "error": str(exc)})
@@ -570,9 +625,14 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         inbox_path = self.voice_server.options.inbox_path
         appended_to_inbox = False
         if inbox_path is not None and should_append_to_inbox(event):
+            inbox_started = time.perf_counter()
             append_event(event, inbox_path)
+            inbox_ms = round((time.perf_counter() - inbox_started) * 1000)
             appended_to_inbox = True
+        else:
+            inbox_ms = 0
 
+        frontend_started = time.perf_counter()
         frontend = forward_to_frontend(
             event,
             wake_url=self.voice_server.options.wake_url,
@@ -586,6 +646,28 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
             quiet_minutes=self.voice_server.options.wake_quiet_minutes,
             prompt_prefix=self.voice_server.options.prompt_prefix,
             wake_words=self.voice_server.options.wake_words,
+            request_id=request_id,
+        )
+        frontend_ms = round((time.perf_counter() - frontend_started) * 1000)
+        timing_ms = {
+            "upload_read": read_ms,
+            "inbox": inbox_ms,
+            "frontend": frontend_ms,
+            "request_total": round((time.perf_counter() - request_started) * 1000),
+        }
+        emit_event(
+            "stackchan.voice.upload.completed",
+            body="Voice upload request completed",
+            request_id=request_id,
+            attributes={
+                "stackchan.audio.bytes": len(audio_data),
+                "stackchan.inbox.appended": appended_to_inbox,
+                "stackchan.frontend.ok": frontend.get("ok"),
+                "stackchan.latency.upload_read_ms": timing_ms["upload_read"],
+                "stackchan.latency.inbox_ms": timing_ms["inbox"],
+                "stackchan.latency.frontend_ms": timing_ms["frontend"],
+                "stackchan.latency.request_total_ms": timing_ms["request_total"],
+            },
         )
 
         write_json(
@@ -596,6 +678,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
                 "event": event,
                 "inbox_appended": appended_to_inbox,
                 "frontend": frontend,
+                "timing_ms": timing_ms,
             },
         )
 
@@ -694,6 +777,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum POST /voice/upload attempts per client IP per minute. Set 0 to disable.",
     )
     parser.add_argument(
+        "--upload-rate-window-seconds",
+        type=float,
+        default=float(
+            os.environ.get("STACKCHAN_VOICE_UPLOAD_RATE_WINDOW_SECONDS", str(DEFAULT_UPLOAD_RATE_WINDOW_SECONDS))
+        ),
+        help="Rate-limit window in seconds. Default: 60.",
+    )
+    parser.add_argument(
         "--allowed-origin",
         action="append",
         default=[],
@@ -726,6 +817,7 @@ def main() -> int:
         wake_words=parse_wake_words(args.wake_words),
         upload_token=args.upload_token,
         upload_rate_per_minute=args.upload_rate_per_minute,
+        upload_rate_window_seconds=args.upload_rate_window_seconds,
         allowed_origins=tuple(args.allowed_origin),
     )
     server = VoiceUploadServer((args.host, args.port), VoiceUploadHandler, config=config, options=options)
@@ -739,6 +831,7 @@ def main() -> int:
                 "inbox": str(options.inbox_path) if options.inbox_path else None,
                 "frontend": bool(options.wake_url and options.wake_session_id),
                 "wake_words": list(options.wake_words),
+                "config": build_health_payload(options)["config"],
             },
             ensure_ascii=False,
         ),

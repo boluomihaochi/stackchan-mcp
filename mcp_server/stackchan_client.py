@@ -4,10 +4,8 @@ from contextlib import suppress
 import requests
 
 from .stackchan_config import (
-    MAX_PCM_PAYLOAD_BYTES,
     PCM_CONTENT_TYPE,
     PCM_SAMPLE_WIDTH,
-    PCM_SEGMENT_BYTES,
     StackchanConfig,
 )
 
@@ -27,15 +25,21 @@ class StackchanClient:
         return f"http://{self.config.stackchan_ip}:{self.config.stackchan_port}"
 
     def play(self, wav_url: str) -> dict:
-        return requests.post(f"{self.base_url}/play", json={"voice_url": wav_url}, timeout=5).json()
+        return requests.post(
+            f"{self.base_url}/play",
+            json={"voice_url": wav_url},
+            timeout=self.config.http_play_timeout,
+        ).json()
 
     def wait_for_playback_start(
         self,
         *,
         baseline_started_ms: int | None = None,
-        timeout: float = 5.0,
-        interval: float = 0.2,
+        timeout: float | None = None,
+        interval: float | None = None,
     ) -> dict:
+        timeout = self.config.playback_start_timeout if timeout is None else timeout
+        interval = self.config.playback_poll_interval if interval is None else interval
         deadline = time.monotonic() + timeout
         last_status: dict = {}
         last_error: str | None = None
@@ -59,34 +63,38 @@ class StackchanClient:
         return result
 
     def get_audio(self) -> bytes | None:
-        resp = requests.get(f"{self.base_url}/audio", timeout=10)
+        resp = requests.get(f"{self.base_url}/audio", timeout=self.config.http_audio_timeout)
         if resp.status_code == 200:
             return resp.content
         return None
 
     def audio_status(self) -> dict:
-        return requests.get(f"{self.base_url}/audio/status", timeout=3).json()
+        return requests.get(f"{self.base_url}/audio/status", timeout=self.config.http_status_timeout).json()
 
     def playback_status(self) -> dict:
-        return requests.get(f"{self.base_url}/playback/status", timeout=3).json()
+        return requests.get(f"{self.base_url}/playback/status", timeout=self.config.http_status_timeout).json()
 
     def move(self, x: float, y: float, speed: int) -> dict:
         return requests.post(
             f"{self.base_url}/move",
             json={"x": x, "y": y, "speed": speed},
-            timeout=5,
+            timeout=self.config.http_command_timeout,
         ).json()
 
     def gesture(self, gesture: str) -> dict:
-        return requests.post(f"{self.base_url}/{gesture}", timeout=5).json()
+        return requests.post(f"{self.base_url}/{gesture}", timeout=self.config.http_command_timeout).json()
 
     def set_face(self, face: str) -> dict:
-        return requests.post(f"{self.base_url}/face", json={"face": face}, timeout=5).json()
+        return requests.post(
+            f"{self.base_url}/face",
+            json={"face": face},
+            timeout=self.config.http_command_timeout,
+        ).json()
 
     def snapshot(self) -> tuple[bytes | None, int]:
         with suppress(Exception):
-            requests.get(f"{self.base_url}/snapshot", timeout=5)
-        resp = requests.get(f"{self.base_url}/snapshot", timeout=10)
+            requests.get(f"{self.base_url}/snapshot", timeout=self.config.http_snapshot_warmup_timeout)
+        resp = requests.get(f"{self.base_url}/snapshot", timeout=self.config.http_snapshot_timeout)
         if resp.status_code == 200:
             return resp.content, len(resp.content)
         return None, 0
@@ -96,12 +104,15 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     import struct
     import uuid
 
+    started_at = time.perf_counter()
     buffer = bytearray()
     total_size = 0
     last_result = None
     session_id = uuid.uuid4().hex
     segment_index = 0
     started = False
+    first_chunk_ms = None
+    first_segment_ms = None
     pending_segment = None
     limited_samples = 0
     declicked_samples = 0
@@ -110,7 +121,7 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     saved_pcm_file = saved_pcm_path.open("wb") if saved_pcm_path is not None else None
 
     def post_segment(segment: bytes, *, final: bool) -> dict:
-        nonlocal declicked_samples, last_segment_tail_sample, segment_index, started
+        nonlocal declicked_samples, first_segment_ms, last_segment_tail_sample, segment_index, started
         if not segment or len(segment) % PCM_SAMPLE_WIDTH != 0:
             raise ValueError(f"invalid PCM payload size: {len(segment)}")
         segment, declicked = audio_processing.declick_pcm_segment(
@@ -131,7 +142,7 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
                     "X-Stackchan-Pcm-Seq": str(segment_index),
                     "X-Stackchan-Pcm-Final": "1" if final else "0",
                 },
-                timeout=30,
+                timeout=client.config.pcm_segment_post_timeout,
             )
             resp.raise_for_status()
             result = resp.json()
@@ -149,6 +160,8 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
         if not result.get("success"):
             raise PcmPlaybackError(f"PCM segment play failed: {result}", started=started)
         started = True
+        if first_segment_ms is None:
+            first_segment_ms = round((time.perf_counter() - started_at) * 1000)
         segment_index += 1
         return result
 
@@ -156,9 +169,14 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
         for chunk in pcm_chunks:
             if not chunk:
                 continue
+            if first_chunk_ms is None:
+                first_chunk_ms = round((time.perf_counter() - started_at) * 1000)
             total_size += len(chunk)
-            if total_size > MAX_PCM_PAYLOAD_BYTES:
-                message = f"PCM payload too large: {total_size} bytes exceeds {MAX_PCM_PAYLOAD_BYTES} byte limit"
+            if total_size > client.config.max_pcm_payload_bytes:
+                message = (
+                    f"PCM payload too large: {total_size} bytes exceeds "
+                    f"{client.config.max_pcm_payload_bytes} byte limit"
+                )
                 if started:
                     raise PcmPlaybackError(message, started=True)
                 raise ValueError(message)
@@ -171,8 +189,10 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
             )
             limited_samples += limited
             buffer.extend(conditioned_chunk)
-            while len(buffer) >= PCM_SEGMENT_BYTES:
-                segment_size = PCM_SEGMENT_BYTES - (PCM_SEGMENT_BYTES % PCM_SAMPLE_WIDTH)
+            while len(buffer) >= client.config.pcm_segment_bytes:
+                segment_size = client.config.pcm_segment_bytes - (
+                    client.config.pcm_segment_bytes % PCM_SAMPLE_WIDTH
+                )
                 segment_size = audio_processing.choose_pcm_segment_cut(
                     buffer,
                     segment_size,
@@ -209,6 +229,14 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     result.setdefault("limited_samples", limited_samples)
     result.setdefault("declick_samples", client.config.pcm_declick_samples)
     result.setdefault("declicked_samples", declicked_samples)
+    result.setdefault(
+        "timing_ms",
+        {
+            "pcm_total": round((time.perf_counter() - started_at) * 1000),
+            "fish_first_chunk": first_chunk_ms,
+            "first_segment_posted": first_segment_ms,
+        },
+    )
     if saved_pcm_path is not None:
         result.setdefault("saved_pcm", str(saved_pcm_path))
     return result

@@ -1,8 +1,10 @@
 import logging
 import os
 import shlex
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,13 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_float_any(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        if name in os.environ:
+            return env_float(name, default)
+    return default
+
+
 def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -54,6 +63,24 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         logger.warning("Invalid %s=%s; using %d", name, raw, default)
         return default
+
+
+def env_int_any(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        if name in os.environ:
+            return env_int(name, default)
+    return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(value, maximum))
 
 
 @dataclass(frozen=True)
@@ -67,8 +94,22 @@ class StackchanConfig:
     save_pcm: bool
     pcm_gain: float
     pcm_limit: float
+    pcm_segment_bytes: int
+    max_pcm_payload_bytes: int
     pcm_declick_samples: int
     pcm_zero_cross_window: int
+    http_play_timeout: float
+    http_audio_timeout: float
+    http_status_timeout: float
+    http_command_timeout: float
+    http_snapshot_warmup_timeout: float
+    http_snapshot_timeout: float
+    playback_start_timeout: float
+    playback_poll_interval: float
+    pcm_segment_post_timeout: float
+    fish_tts_timeout: float
+    fish_asr_timeout: float
+    fish_stream_chunk_bytes: int
     edge_tts_bin: str
     fish_audio_key: str
     fish_audio_model_zh: str
@@ -82,11 +123,61 @@ PCM_SAMPLE_WIDTH = 2
 PCM_CONTENT_TYPE = "audio/x-raw;format=s16le;rate=24000;channels=1"
 MAX_PCM_PAYLOAD_BYTES = 2 * 1024 * 1024
 PCM_SEGMENT_BYTES = 48 * 1024
+FISH_STREAM_CHUNK_BYTES = 4096
+DEFAULT_AUDIO_DIR = str(Path(tempfile.gettempdir()) / "stackchan_audio")
 VALID_FACES = ("calm", "thinking", "happy", "sleepy", "shy", "smug", "pouty")
 EDGE_VOICES = {
     "zh": "zh-CN-YunxiNeural",
     "en": "en-US-GuyNeural",
 }
+
+
+def config_summary(config: StackchanConfig) -> dict[str, Any]:
+    return {
+        "stackchan": {
+            "ip": config.stackchan_ip,
+            "port": config.stackchan_port,
+            "base_url": f"http://{config.stackchan_ip}:{config.stackchan_port}",
+        },
+        "audio": {
+            "mac_ip": config.mac_ip,
+            "serve_port": config.audio_serve_port,
+            "mode": config.audio_mode,
+            "save_pcm": config.save_pcm,
+        },
+        "pcm": {
+            "sample_rate": PCM_SAMPLE_RATE,
+            "channels": PCM_CHANNELS,
+            "sample_width": PCM_SAMPLE_WIDTH,
+            "segment_bytes": config.pcm_segment_bytes,
+            "max_payload_bytes": config.max_pcm_payload_bytes,
+            "gain": config.pcm_gain,
+            "limit": config.pcm_limit,
+            "declick_samples": config.pcm_declick_samples,
+            "zero_cross_window": config.pcm_zero_cross_window,
+        },
+        "tts": {
+            "engine": config.tts_engine,
+            "edge_tts_bin": config.edge_tts_bin,
+            "fish_audio_key_configured": bool(config.fish_audio_key),
+            "fish_audio_model_zh_configured": bool(config.fish_audio_model_zh),
+            "fish_audio_model_en_configured": bool(config.fish_audio_model_en),
+            "fish_stream_chunk_bytes": config.fish_stream_chunk_bytes,
+        },
+        "timeouts": {
+            "http_play": config.http_play_timeout,
+            "http_audio": config.http_audio_timeout,
+            "http_status": config.http_status_timeout,
+            "http_command": config.http_command_timeout,
+            "http_snapshot_warmup": config.http_snapshot_warmup_timeout,
+            "http_snapshot": config.http_snapshot_timeout,
+            "playback_start": config.playback_start_timeout,
+            "playback_poll_interval": config.playback_poll_interval,
+            "pcm_segment_post": config.pcm_segment_post_timeout,
+            "fish_tts": config.fish_tts_timeout,
+            "fish_asr": config.fish_asr_timeout,
+        },
+    }
 
 
 def load_config() -> StackchanConfig:
@@ -97,15 +188,29 @@ def load_config() -> StackchanConfig:
         logger.warning("Invalid STACKCHAN_AUDIO_MODE=%s; using auto", audio_mode)
         audio_mode = "auto"
 
+    pcm_segment_bytes = clamp_int(
+        env_int("STACKCHAN_PCM_SEGMENT_BYTES", PCM_SEGMENT_BYTES),
+        PCM_SAMPLE_WIDTH,
+        MAX_PCM_PAYLOAD_BYTES,
+    )
+    pcm_segment_bytes -= pcm_segment_bytes % PCM_SAMPLE_WIDTH
+    max_pcm_payload_bytes = clamp_int(
+        env_int_any(
+            ("STACKCHAN_PCM_MAX_PAYLOAD_BYTES", "STACKCHAN_MAX_PCM_PAYLOAD_BYTES"),
+            MAX_PCM_PAYLOAD_BYTES,
+        ),
+        pcm_segment_bytes,
+        64 * 1024 * 1024,
+    )
     pcm_gain = max(0.0, min(env_float("STACKCHAN_PCM_GAIN", 0.75), 1.0))
     pcm_limit = max(0.1, min(env_float("STACKCHAN_PCM_LIMIT", 0.90), 1.0))
     pcm_declick_samples = max(
         0,
-        min(env_int("STACKCHAN_PCM_DECLICK_SAMPLES", 64), PCM_SEGMENT_BYTES // PCM_SAMPLE_WIDTH),
+        min(env_int("STACKCHAN_PCM_DECLICK_SAMPLES", 64), pcm_segment_bytes // PCM_SAMPLE_WIDTH),
     )
     pcm_zero_cross_window = max(
         0,
-        min(env_int("STACKCHAN_PCM_ZERO_CROSS_WINDOW", 256), PCM_SEGMENT_BYTES // PCM_SAMPLE_WIDTH),
+        min(env_int("STACKCHAN_PCM_ZERO_CROSS_WINDOW", 256), pcm_segment_bytes // PCM_SAMPLE_WIDTH),
     )
 
     return StackchanConfig(
@@ -115,11 +220,44 @@ def load_config() -> StackchanConfig:
         audio_serve_port=int(os.environ.get("AUDIO_SERVE_PORT", 5060)),
         tts_engine=os.environ.get("TTS_ENGINE", "fish-audio"),
         audio_mode=audio_mode,
-        save_pcm=os.environ.get("STACKCHAN_SAVE_PCM", "0").lower() in {"1", "true", "yes"},
+        save_pcm=env_bool("STACKCHAN_SAVE_PCM"),
         pcm_gain=pcm_gain,
         pcm_limit=pcm_limit,
+        pcm_segment_bytes=pcm_segment_bytes,
+        max_pcm_payload_bytes=max_pcm_payload_bytes,
         pcm_declick_samples=pcm_declick_samples,
         pcm_zero_cross_window=pcm_zero_cross_window,
+        http_play_timeout=env_float_any(("STACKCHAN_HTTP_PLAY_TIMEOUT", "STACKCHAN_HTTP_PLAY_TIMEOUT_SEC"), 5.0),
+        http_audio_timeout=env_float_any(("STACKCHAN_HTTP_AUDIO_TIMEOUT", "STACKCHAN_HTTP_AUDIO_TIMEOUT_SEC"), 10.0),
+        http_status_timeout=env_float_any(("STACKCHAN_HTTP_STATUS_TIMEOUT", "STACKCHAN_HTTP_STATUS_TIMEOUT_SEC"), 3.0),
+        http_command_timeout=env_float_any(("STACKCHAN_HTTP_COMMAND_TIMEOUT", "STACKCHAN_HTTP_COMMAND_TIMEOUT_SEC"), 5.0),
+        http_snapshot_warmup_timeout=env_float_any(
+            ("STACKCHAN_HTTP_SNAPSHOT_WARMUP_TIMEOUT", "STACKCHAN_HTTP_SNAPSHOT_WARMUP_TIMEOUT_SEC"),
+            5.0,
+        ),
+        http_snapshot_timeout=env_float_any(
+            ("STACKCHAN_HTTP_SNAPSHOT_TIMEOUT", "STACKCHAN_HTTP_SNAPSHOT_TIMEOUT_SEC"),
+            10.0,
+        ),
+        playback_start_timeout=env_float_any(
+            ("STACKCHAN_PLAYBACK_START_TIMEOUT", "STACKCHAN_PLAYBACK_START_TIMEOUT_SEC"),
+            5.0,
+        ),
+        playback_poll_interval=env_float_any(
+            ("STACKCHAN_PLAYBACK_POLL_INTERVAL", "STACKCHAN_PLAYBACK_POLL_INTERVAL_SEC"),
+            0.2,
+        ),
+        pcm_segment_post_timeout=env_float_any(
+            ("STACKCHAN_PCM_SEGMENT_POST_TIMEOUT", "STACKCHAN_PCM_SEGMENT_POST_TIMEOUT_SEC"),
+            30.0,
+        ),
+        fish_tts_timeout=env_float_any(("STACKCHAN_FISH_TTS_TIMEOUT", "STACKCHAN_FISH_TTS_TIMEOUT_SEC"), 30.0),
+        fish_asr_timeout=env_float_any(("STACKCHAN_FISH_ASR_TIMEOUT", "STACKCHAN_FISH_ASR_TIMEOUT_SEC"), 15.0),
+        fish_stream_chunk_bytes=clamp_int(
+            env_int("STACKCHAN_FISH_STREAM_CHUNK_BYTES", FISH_STREAM_CHUNK_BYTES),
+            PCM_SAMPLE_WIDTH,
+            1024 * 1024,
+        ),
         edge_tts_bin=os.environ.get("EDGE_TTS_BIN", "edge-tts"),
         fish_audio_key=os.environ.get("FISH_AUDIO_KEY", ""),
         fish_audio_model_zh=os.environ.get("FISH_AUDIO_MODEL_ZH", ""),

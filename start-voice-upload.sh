@@ -84,6 +84,10 @@ CLOUDFLARED_LABEL="${STACKCHAN_CLOUDFLARED_LAUNCHD_LABEL:-xyz.stackchan.cloudfla
 VOICE_UPLOAD_LABEL="${STACKCHAN_VOICE_UPLOAD_LAUNCHD_LABEL:-xyz.stackchan.voice-upload}"
 FRONTEND_HEALTH_URL="${STACKCHAN_FRONTEND_HEALTH_URL:-http://127.0.0.1:3200/health}"
 PYTHON_BIN="${STACKCHAN_VOICE_PYTHON:-$SCRIPT_DIR/.venv/bin/python}"
+STACKCHAN_VOICE_HEALTH_ATTEMPTS="${STACKCHAN_VOICE_HEALTH_ATTEMPTS:-20}"
+STACKCHAN_VOICE_HEALTH_TIMEOUT_SEC="${STACKCHAN_VOICE_HEALTH_TIMEOUT_SEC:-1}"
+STACKCHAN_VOICE_HEALTH_INTERVAL_SEC="${STACKCHAN_VOICE_HEALTH_INTERVAL_SEC:-0.25}"
+STACKCHAN_VOICE_STATUS_TIMEOUT_SEC="${STACKCHAN_VOICE_STATUS_TIMEOUT_SEC:-5}"
 
 python_cmd() {
     if [ -x "$PYTHON_BIN" ]; then
@@ -162,7 +166,7 @@ print_upload_token_hint() {
 check_url() {
     local label="$1"
     local url="$2"
-    if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+    if curl -fsS --max-time "$STACKCHAN_VOICE_STATUS_TIMEOUT_SEC" "$url" >/dev/null 2>&1; then
         echo "[ok] $label: $url"
     else
         echo "[fail] $label: $url"
@@ -182,11 +186,12 @@ check_cloudflared() {
 }
 
 wait_for_health() {
-    for _ in {1..20}; do
-        if curl -fsS --max-time 1 "$(health_url)" >/dev/null 2>&1; then
+    local attempt
+    for ((attempt = 1; attempt <= STACKCHAN_VOICE_HEALTH_ATTEMPTS; attempt++)); do
+        if curl -fsS --max-time "$STACKCHAN_VOICE_HEALTH_TIMEOUT_SEC" "$(health_url)" >/dev/null 2>&1; then
             return 0
         fi
-        sleep 0.25
+        sleep "$STACKCHAN_VOICE_HEALTH_INTERVAL_SEC"
     done
     return 1
 }

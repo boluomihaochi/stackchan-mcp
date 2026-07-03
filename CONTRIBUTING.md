@@ -59,12 +59,13 @@ cp .env.example .env
 Do not commit `.env`, API keys, voice model ids, upload tokens, public tunnel
 hostnames, or private LAN addresses.
 
-## Optional Git Hook
+## Git Hooks
 
-This repository includes an optional pre-commit hook for fast local checks:
+This repository uses local Git hooks for fast checks and commit-message
+validation. Enable them after cloning:
 
 ```sh
-git config core.hooksPath .githooks
+make install-hooks
 ```
 
 By default it runs `uv run ruff check .` and `uv run pytest
@@ -74,8 +75,8 @@ tests/test_mcp_server.py`. To run the full Makefile gate before a commit:
 STACKCHAN_HOOK_FULL=1 git commit
 ```
 
-The same hook path also enables a `commit-msg` hook that rejects commit subjects
-which do not follow Conventional Commits.
+The same hook path enables a `commit-msg` hook that rejects commit subjects
+which do not follow Conventional Commits. This is required for local commits.
 
 ## Commit Messages
 

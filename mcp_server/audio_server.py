@@ -1,15 +1,18 @@
 import logging
+import os
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .stackchan_config import DEFAULT_AUDIO_DIR
+
 logger = logging.getLogger(__name__)
 
-AUDIO_DIR = Path("/tmp/stackchan_audio")  # noqa: S108 - local audio cache, mode restricted below.
-AUDIO_DIR.mkdir(exist_ok=True)
+AUDIO_DIR = Path(os.environ.get("STACKCHAN_AUDIO_DIR", DEFAULT_AUDIO_DIR))
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.chmod(0o700)
 TEMP_AUDIO_DIR = AUDIO_DIR / ".tmp"
-TEMP_AUDIO_DIR.mkdir(exist_ok=True)
+TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_AUDIO_DIR.chmod(0o700)
 
 _http_server = None

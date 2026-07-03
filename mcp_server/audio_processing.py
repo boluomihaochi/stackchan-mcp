@@ -148,7 +148,7 @@ def tts_fish(text: str, lang: str, config: StackchanConfig) -> Path:
                 "format": "wav",
                 "sample_rate": PCM_SAMPLE_RATE,
             },
-            timeout=30,
+            timeout=config.fish_tts_timeout,
         )
         raise_for_fish_status(resp)
         raw_path.write_bytes(resp.content)
@@ -271,10 +271,10 @@ def iter_fish_pcm_stream(text: str, lang: str, config: StackchanConfig):
             "sample_rate": PCM_SAMPLE_RATE,
         },
         stream=True,
-        timeout=30,
+        timeout=config.fish_tts_timeout,
     )
     raise_for_fish_status(resp)
-    for chunk in resp.iter_content(chunk_size=4096):
+    for chunk in resp.iter_content(chunk_size=config.fish_stream_chunk_bytes):
         if chunk:
             yield chunk
 
@@ -286,7 +286,7 @@ def transcribe_audio(wav_path: Path, lang: str, config: StackchanConfig) -> dict
             headers={"Authorization": f"Bearer {config.fish_audio_key}"},
             files={"audio": f},
             data={"language": lang},
-            timeout=15,
+            timeout=config.fish_asr_timeout,
         )
     resp.raise_for_status()
     return resp.json()

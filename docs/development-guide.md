@@ -440,6 +440,9 @@ project-root `.env`: `STACKCHAN_PORT`, `MCP_PYTHON`, `MCP_MODULE`,
 `STACKCHAN_LOG_DIR`. If `MCP_PYTHON` is unset it uses `uv run python`, which
 avoids hard-coding a personal virtualenv path.
 
+For client-specific setup snippets and one-click install notes, see
+`docs/mcp-client-setup.md`.
+
 Run the MCP-only regression tests without a device:
 
 ```sh
