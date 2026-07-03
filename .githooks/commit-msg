@@ -4,7 +4,13 @@ set -eu
 message_file="$1"
 subject="$(sed -n '1p' "$message_file")"
 
-pattern='^(feat|fix|docs|test|refactor|build|ci|chore|perf|style)(\([a-z0-9._-]+\))?!?: .+'
+case "$subject" in
+    "Merge "*|"Revert "*|"fixup! "*|"squash! "*)
+        exit 0
+        ;;
+esac
+
+pattern='^(feat|fix|docs|test|refactor|build|ci|chore|perf|style)(\([a-z0-9._-]+\))?!?: [^[:space:]].+'
 
 if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
     cat >&2 <<'EOF'
@@ -20,6 +26,8 @@ Examples:
 
 Allowed types:
   feat, fix, docs, test, refactor, build, ci, chore, perf, style
+
+Git-generated merge, revert, fixup!, and squash! subjects are allowed.
 EOF
     exit 1
 fi

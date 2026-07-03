@@ -1,4 +1,7 @@
-.PHONY: lint lint-python typecheck-python lint-firmware test test-python test-mcp mcp-test test-firmware-cpp build-firmware audit-security ci-local
+.PHONY: install-hooks lint lint-python typecheck-python lint-firmware test test-python test-mcp mcp-test test-firmware-cpp build-firmware audit-security ci-local
+
+install-hooks:
+	git config core.hooksPath .githooks
 
 lint: lint-python typecheck-python lint-firmware
 
