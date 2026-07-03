@@ -96,12 +96,15 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     import struct
     import uuid
 
+    started_at = time.perf_counter()
     buffer = bytearray()
     total_size = 0
     last_result = None
     session_id = uuid.uuid4().hex
     segment_index = 0
     started = False
+    first_chunk_ms = None
+    first_segment_ms = None
     pending_segment = None
     limited_samples = 0
     declicked_samples = 0
@@ -110,7 +113,7 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     saved_pcm_file = saved_pcm_path.open("wb") if saved_pcm_path is not None else None
 
     def post_segment(segment: bytes, *, final: bool) -> dict:
-        nonlocal declicked_samples, last_segment_tail_sample, segment_index, started
+        nonlocal declicked_samples, first_segment_ms, last_segment_tail_sample, segment_index, started
         if not segment or len(segment) % PCM_SAMPLE_WIDTH != 0:
             raise ValueError(f"invalid PCM payload size: {len(segment)}")
         segment, declicked = audio_processing.declick_pcm_segment(
@@ -149,6 +152,8 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
         if not result.get("success"):
             raise PcmPlaybackError(f"PCM segment play failed: {result}", started=started)
         started = True
+        if first_segment_ms is None:
+            first_segment_ms = round((time.perf_counter() - started_at) * 1000)
         segment_index += 1
         return result
 
@@ -156,6 +161,8 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
         for chunk in pcm_chunks:
             if not chunk:
                 continue
+            if first_chunk_ms is None:
+                first_chunk_ms = round((time.perf_counter() - started_at) * 1000)
             total_size += len(chunk)
             if total_size > MAX_PCM_PAYLOAD_BYTES:
                 message = f"PCM payload too large: {total_size} bytes exceeds {MAX_PCM_PAYLOAD_BYTES} byte limit"
@@ -209,6 +216,14 @@ def post_pcm_stream(client: StackchanClient, pcm_chunks, audio_dir, audio_proces
     result.setdefault("limited_samples", limited_samples)
     result.setdefault("declick_samples", client.config.pcm_declick_samples)
     result.setdefault("declicked_samples", declicked_samples)
+    result.setdefault(
+        "timing_ms",
+        {
+            "pcm_total": round((time.perf_counter() - started_at) * 1000),
+            "fish_first_chunk": first_chunk_ms,
+            "first_segment_posted": first_segment_ms,
+        },
+    )
     if saved_pcm_path is not None:
         result.setdefault("saved_pcm", str(saved_pcm_path))
     return result

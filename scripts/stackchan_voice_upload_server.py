@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp_server import audio_processing  # noqa: E402
 from mcp_server.audio_server import AUDIO_DIR  # noqa: E402
 from mcp_server.stackchan_config import StackchanConfig, load_config  # noqa: E402
+from mcp_server.telemetry import emit_event, new_request_id  # noqa: E402
 from mcp_server.voice_inbox import append_event, resolve_inbox_path  # noqa: E402
 from scripts.stackchan_frontend_wake import (  # noqa: E402
     DEFAULT_PROMPT_PREFIX,
@@ -399,11 +400,13 @@ def build_transcript_event(
     audio_bytes: int,
     asr_result: dict[str, Any],
     lang: str,
+    request_id: str,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "transcript",
         "source": "voice_upload",
+        "request_id": request_id,
         "timestamp": timestamp or utc_now(),
         "lang": lang,
         "text": asr_result.get("text", ""),
@@ -421,18 +424,44 @@ def process_uploaded_wav(
     lang: str = "zh",
     audio_dir: Path = AUDIO_DIR,
     transcribe_fn=audio_processing.transcribe_audio,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
+    request_id = request_id or new_request_id()
+    started = time.perf_counter()
     if not config.fish_audio_key:
         raise RuntimeError("Fish Audio key is not configured; set FISH_AUDIO_KEY before uploading audio.")
 
+    save_started = time.perf_counter()
     wav_path = save_uploaded_wav(audio_data, audio_dir)
+    save_ms = round((time.perf_counter() - save_started) * 1000)
+    asr_started = time.perf_counter()
     asr_result = transcribe_fn(wav_path, lang, config)
-    return build_transcript_event(
+    event = build_transcript_event(
         wav_path=wav_path,
         audio_bytes=len(audio_data),
         asr_result=asr_result,
         lang=lang,
+        request_id=request_id,
     )
+    event["timing_ms"] = {
+        "upload_save": save_ms,
+        "asr": round((time.perf_counter() - asr_started) * 1000),
+        "process_total": round((time.perf_counter() - started) * 1000),
+    }
+    emit_event(
+        "stackchan.voice.asr.completed",
+        body="Uploaded voice recording transcribed",
+        request_id=request_id,
+        attributes={
+            "stackchan.lang": lang,
+            "stackchan.audio.bytes": len(audio_data),
+            "stackchan.transcript.length": len(str(event.get("text") or "")),
+            "stackchan.latency.upload_save_ms": event["timing_ms"]["upload_save"],
+            "stackchan.latency.asr_ms": event["timing_ms"]["asr"],
+            "stackchan.latency.process_total_ms": event["timing_ms"]["process_total"],
+        },
+    )
+    return event
 
 
 def is_upload_authorized(path: str, headers: Any, token: str) -> bool:
@@ -518,6 +547,8 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        request_id = new_request_id()
+        request_started = time.perf_counter()
         path = urlparse(self.path).path
         if path != "/voice/upload":
             write_json(self, 404, {"ok": False, "error": "not found"})
@@ -552,7 +583,9 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
             write_json(self, 413, {"ok": False, "error": "audio payload too large"})
             return
 
+        read_started = time.perf_counter()
         audio_data = self.rfile.read(content_length)
+        read_ms = round((time.perf_counter() - read_started) * 1000)
         if len(audio_data) != content_length:
             write_json(self, 400, {"ok": False, "error": "short audio body"})
             return
@@ -562,6 +595,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
                 audio_data,
                 self.voice_server.config,
                 lang=self.voice_server.options.lang,
+                request_id=request_id,
             )
         except Exception as exc:
             write_json(self, 500, {"ok": False, "error": str(exc)})
@@ -570,9 +604,14 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
         inbox_path = self.voice_server.options.inbox_path
         appended_to_inbox = False
         if inbox_path is not None and should_append_to_inbox(event):
+            inbox_started = time.perf_counter()
             append_event(event, inbox_path)
+            inbox_ms = round((time.perf_counter() - inbox_started) * 1000)
             appended_to_inbox = True
+        else:
+            inbox_ms = 0
 
+        frontend_started = time.perf_counter()
         frontend = forward_to_frontend(
             event,
             wake_url=self.voice_server.options.wake_url,
@@ -586,6 +625,28 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
             quiet_minutes=self.voice_server.options.wake_quiet_minutes,
             prompt_prefix=self.voice_server.options.prompt_prefix,
             wake_words=self.voice_server.options.wake_words,
+            request_id=request_id,
+        )
+        frontend_ms = round((time.perf_counter() - frontend_started) * 1000)
+        timing_ms = {
+            "upload_read": read_ms,
+            "inbox": inbox_ms,
+            "frontend": frontend_ms,
+            "request_total": round((time.perf_counter() - request_started) * 1000),
+        }
+        emit_event(
+            "stackchan.voice.upload.completed",
+            body="Voice upload request completed",
+            request_id=request_id,
+            attributes={
+                "stackchan.audio.bytes": len(audio_data),
+                "stackchan.inbox.appended": appended_to_inbox,
+                "stackchan.frontend.ok": frontend.get("ok"),
+                "stackchan.latency.upload_read_ms": timing_ms["upload_read"],
+                "stackchan.latency.inbox_ms": timing_ms["inbox"],
+                "stackchan.latency.frontend_ms": timing_ms["frontend"],
+                "stackchan.latency.request_total_ms": timing_ms["request_total"],
+            },
         )
 
         write_json(
@@ -596,6 +657,7 @@ class VoiceUploadHandler(BaseHTTPRequestHandler):
                 "event": event,
                 "inbox_appended": appended_to_inbox,
                 "frontend": frontend,
+                "timing_ms": timing_ms,
             },
         )
 

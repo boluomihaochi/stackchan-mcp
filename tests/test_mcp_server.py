@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import struct
 import sys
@@ -27,6 +28,11 @@ from scripts.stackchan_voice_bridge import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def isolate_telemetry_log(monkeypatch, tmp_path):
+    monkeypatch.setenv("STACKCHAN_OTEL_LOG", str(tmp_path / "otel.jsonl"))
 
 
 class FakeFastMCP:
@@ -177,7 +183,9 @@ def test_voice_bridge_only_appends_non_empty_transcripts_to_inbox():
     assert not should_append_to_inbox({"type": "idle", "text": "小记，你好。"})
 
 
-def test_voice_upload_processes_wav_into_transcript_event(tmp_path):
+def test_voice_upload_processes_wav_into_transcript_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("STACKCHAN_OTEL_LOG", str(tmp_path / "otel.jsonl"))
+
     def fake_transcribe(wav_path, lang, config):
         assert wav_path.read_bytes() == b"RIFF-upload-wav"
         assert lang == "zh"
@@ -194,11 +202,16 @@ def test_voice_upload_processes_wav_into_transcript_event(tmp_path):
 
     assert event["type"] == "transcript"
     assert event["source"] == "voice_upload"
+    assert event["request_id"]
     assert event["text"] == "从上传来的声音"
     assert event["duration"] == 2.5
     assert event["detected_language"] == "zh"
     assert event["audio_bytes"] == len(b"RIFF-upload-wav")
+    assert set(event["timing_ms"]) == {"upload_save", "asr", "process_total"}
     assert Path(event["wav_path"]).exists()
+    records = [json.loads(line) for line in (tmp_path / "otel.jsonl").read_text().splitlines()]
+    assert records[-1]["event_name"] == "stackchan.voice.asr.completed"
+    assert records[-1]["attributes"]["stackchan.request_id"] == event["request_id"]
 
 
 def test_voice_upload_requires_fish_key_before_processing(tmp_path):
@@ -217,7 +230,9 @@ def test_voice_upload_frontend_forwarding_skips_without_config():
         session_id="",
     )
 
-    assert result == {"ok": False, "skipped": "frontend wake not configured"}
+    assert result["ok"] is False
+    assert result["skipped"] == "frontend wake not configured"
+    assert "wake_total" in result["timing_ms"]
 
 
 def test_voice_upload_recorder_page_exposes_upload_ui():
@@ -341,11 +356,10 @@ def test_voice_upload_wake_words_skip_frontend_without_activation(monkeypatch):
         wake_words=("小塔", "机器人"),
     )
 
-    assert result == {
-        "ok": False,
-        "skipped": "wake word not found",
-        "wake_words": ["小塔", "机器人"],
-    }
+    assert result["ok"] is False
+    assert result["skipped"] == "wake word not found"
+    assert result["wake_words"] == ["小塔", "机器人"]
+    assert "wake_total" in result["timing_ms"]
 
 
 def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
@@ -376,6 +390,7 @@ def test_voice_upload_frontend_forwarding_posts_wake_request(monkeypatch):
 
     assert result["ok"] is True
     assert result["wake_word"] == "小塔"
+    assert set(result["timing_ms"]) == {"wake_post", "wake_total"}
     assert calls == [
         {
             "url": "http://127.0.0.1:3200/wake",
@@ -429,7 +444,11 @@ def test_voice_upload_frontend_forwarding_retries_busy(monkeypatch):
         retry_delay=0.1,
     )
 
-    assert result == {"ok": True, "status_code": 200, "attempts": 2, "body": {"ok": True}}
+    assert result["ok"] is True
+    assert result["status_code"] == 200
+    assert result["attempts"] == 2
+    assert result["body"] == {"ok": True}
+    assert set(result["timing_ms"]) == {"wake_post", "wake_total"}
     assert len(calls) == 2
 
 
@@ -626,6 +645,7 @@ def test_post_pcm_stream_posts_binary_payload_with_content_length(monkeypatch, t
 
     assert result["success"] is True
     assert result["segments"] == 1
+    assert set(result["timing_ms"]) == {"pcm_total", "fish_first_chunk", "first_segment_posted"}
     assert request_kwargs["kwargs"]["data"] == struct.pack("<hh", 750, -750)
     assert isinstance(request_kwargs["kwargs"]["data"], bytes)
     headers = request_kwargs["kwargs"]["headers"]
