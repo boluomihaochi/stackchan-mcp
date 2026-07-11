@@ -1,13 +1,20 @@
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import os
 import shutil
 import struct
 import subprocess
+import tempfile
 import time
 import uuid
 import wave
 from pathlib import Path
 
 import requests
+import websockets
 
 from .audio_server import AUDIO_DIR, TEMP_AUDIO_DIR
 from .stackchan_config import (
@@ -279,7 +286,71 @@ def iter_fish_pcm_stream(text: str, lang: str, config: StackchanConfig):
             yield chunk
 
 
+def _xunfei_auth_url(app_id: str, api_key: str) -> str:
+    ts = str(int(time.time()))
+    md5 = hashlib.md5((app_id + ts).encode("utf-8")).hexdigest().encode("utf-8")
+    sign = base64.b64encode(hmac.new(api_key.encode("utf-8"), md5, hashlib.sha1).digest()).decode("utf-8")
+    return f"wss://rtasr.xfyun.cn/v1/ws?appid={app_id}&ts={ts}&signa={sign}"
+
+
+def _resample_wav_to_16k(wav_path: Path) -> Path:
+    """重采样到16kHz单声道，讯飞rtasr要求。"""
+    ffmpeg_bin = require_executable("ffmpeg")
+    out_path = wav_path.with_suffix(".16k.wav")
+    subprocess.run(
+        [ffmpeg_bin, "-y", "-i", str(wav_path), "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(out_path)],
+        check=True,
+        capture_output=True,
+    )
+    return out_path
+
+
+async def _xunfei_transcribe_async(wav_path: Path, app_id: str, api_key: str) -> str:
+    url = _xunfei_auth_url(app_id, api_key)
+    result_parts: list[str] = []
+
+    async with websockets.connect(url) as ws:
+        with wave.open(str(wav_path), "rb") as wf:
+            pcm = wf.readframes(wf.getnframes())
+
+        chunk_size = 1280  # 40ms @16kHz 16bit mono
+        for i in range(0, len(pcm), chunk_size):
+            await ws.send(pcm[i : i + chunk_size])
+            await asyncio.sleep(0.04)
+
+        await ws.send(json.dumps({"end": True}))
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=8.0)
+            except asyncio.TimeoutError:
+                break
+            data = json.loads(msg)
+            if data.get("action") == "error":
+                raise RuntimeError(f"讯飞STT错误: {data}")
+            if data.get("action") == "result":
+                seg = json.loads(data.get("data", "{}"))
+                for word in seg.get("cn", {}).get("st", {}).get("rt", [{}])[0].get("ws", []):
+                    for cw in word.get("cw", []):
+                        result_parts.append(cw.get("w", ""))
+                if seg.get("cn", {}).get("st", {}).get("type") == "0":
+                    break
+
+    return "".join(result_parts)
+
+
+def transcribe_xunfei(wav_path: Path, config: StackchanConfig) -> dict:
+    resampled = _resample_wav_to_16k(wav_path)
+    try:
+        text = asyncio.run(_xunfei_transcribe_async(resampled, config.xunfei_app_id, config.xunfei_api_key))
+    finally:
+        resampled.unlink(missing_ok=True)
+    return {"text": text}
+
+
 def transcribe_audio(wav_path: Path, lang: str, config: StackchanConfig) -> dict:
+    if config.xunfei_app_id and config.xunfei_api_key:
+        return transcribe_xunfei(wav_path, config)
     with open(wav_path, "rb") as f:
         resp = requests.post(
             "https://api.fish.audio/v1/asr",

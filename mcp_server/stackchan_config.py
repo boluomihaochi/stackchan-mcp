@@ -121,6 +121,8 @@ class StackchanConfig:
     fish_audio_key: str
     fish_audio_model_zh: str
     fish_audio_model_en: str
+    xunfei_app_id: str = ""
+    xunfei_api_key: str = ""
     mcp_auth_token: str = ""
 
 
@@ -311,5 +313,7 @@ def load_config() -> StackchanConfig:
         fish_audio_key=os.environ.get("FISH_AUDIO_KEY", ""),
         fish_audio_model_zh=os.environ.get("FISH_AUDIO_MODEL_ZH", ""),
         fish_audio_model_en=os.environ.get("FISH_AUDIO_MODEL_EN", ""),
+        xunfei_app_id=os.environ.get("XUNFEI_APP_ID", ""),
+        xunfei_api_key=os.environ.get("XUNFEI_API_KEY", ""),
         mcp_auth_token=os.environ.get("STACKCHAN_MCP_AUTH_TOKEN", ""),
     )
