@@ -42,4 +42,8 @@
 // ディスプレイ
 #define DISPLAY_BRIGHTNESS  70
 
+// VPS WebSocket bridge (reverse connection — Stackchan connects OUT to VPS)
+#define WS_SERVER_HOST  "149.28.87.14"
+#define WS_SERVER_PORT  8765
+
 #endif

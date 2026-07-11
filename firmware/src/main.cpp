@@ -14,6 +14,7 @@
 #include "servo_service.h"
 #include "camera_service.h"
 #include "audio_gate.h"
+#include "ws_client_service.h"
 
 void setup() {
     Serial.begin(115200);
@@ -47,10 +48,12 @@ void setup() {
     initPlayback();
     initPcmStreamService();
     initHttpServer();
+    initWsClient();
 }
 void loop() {
     M5StackChan.update();
     handleHttpServer();
+    serviceWsClient();
     serviceWiFi();
     updateServoGesture();
 

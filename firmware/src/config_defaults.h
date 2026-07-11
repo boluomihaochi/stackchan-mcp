@@ -77,4 +77,14 @@
 #define DISPLAY_BRIGHTNESS 70
 #endif
 
+// ── WebSocket bridge server (VPS reverse-connection) ──────────────────────
+// Stackchan connects OUT to VPS; VPS never needs to reach Stackchan's LAN IP.
+// Override both in firmware/src/config.h with your actual values.
+#ifndef WS_SERVER_HOST
+#define WS_SERVER_HOST "your-vps-host"
+#endif
+#ifndef WS_SERVER_PORT
+#define WS_SERVER_PORT 8765
+#endif
+
 #endif
