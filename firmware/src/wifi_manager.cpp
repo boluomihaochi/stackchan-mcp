@@ -13,7 +13,9 @@ struct NetworkConfig {
 
 static const NetworkConfig NETWORKS[WIFI_NETWORK_COUNT] = {
     { WIFI_SSID_0, WIFI_PASSWORD_0 },
+#if WIFI_NETWORK_COUNT > 1
     { WIFI_SSID_1, WIFI_PASSWORD_1 },
+#endif
 };
 
 #define WIFI_RECONNECT_INTERVAL_MS 5000
