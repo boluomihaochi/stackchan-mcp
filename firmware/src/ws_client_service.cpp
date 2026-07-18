@@ -270,7 +270,9 @@ void initWsClient() {
     s_ws.begin(WS_SERVER_HOST, WS_SERVER_PORT, "/ws/stackchan");
     s_ws.onEvent(wsEventHandler);
     s_ws.setReconnectInterval(5000);
-    s_ws.enableHeartbeat(20000, 5000, 2);
+    // 10s pong timeout x3 retries: 5s/x2 was too strict for the
+    // cellular-hotspot -> LA route and killed the link every ~50s
+    s_ws.enableHeartbeat(20000, 10000, 3);
     Serial.printf("[WS] Connecting to ws://%s:%d/ws/stackchan\n",
                   WS_SERVER_HOST, WS_SERVER_PORT);
 }
