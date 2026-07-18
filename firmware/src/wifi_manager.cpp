@@ -23,6 +23,7 @@ static const NetworkConfig NETWORKS[WIFI_NETWORK_COUNT] = {
 void connectWiFi() {
     Serial.println("\nConnecting to WiFi...");
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep causes periodic WS drops on hotspots
 
     for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
         Serial.printf("[WIFI] 試行 %d/%d: %s\n", i + 1, WIFI_NETWORK_COUNT, NETWORKS[i].ssid);
