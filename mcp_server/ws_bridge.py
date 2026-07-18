@@ -69,10 +69,12 @@ class StackchanBridge:
         self._loop.run_until_complete(self._serve())
 
     async def _serve(self) -> None:
-        # ping_interval=None: the Stackchan firmware doesn't answer WS pings,
-        # so the default 20s+20s keepalive kills the link at exactly ~50s
+        # Tolerant keepalive: 40s pong grace rides out cross-ocean latency
+        # spikes, while still reaping zombie connections the hotspot leaves
+        # behind (with pings fully off, dead sockets look connected forever
+        # and commands vanish into them)
         async with websockets.serve(self._handle_connection, self.host, self.port,
-                                    ping_interval=None):
+                                    ping_interval=20, ping_timeout=40):
             logger.info("[WS bridge] listening on ws://%s:%d", self.host, self.port)
             await asyncio.Future()  # run forever
 
