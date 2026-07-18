@@ -284,17 +284,17 @@ void serviceWsClient() {
 
     unsigned long now = millis();
 
-    // Notify VPS when a mic recording becomes available
-    if (now - s_last_audio_check_ms >= AUDIO_CHECK_INTERVAL_MS) {
-        s_last_audio_check_ms = now;
-        if (hasLastRecording()) {
-            RecordingSnapshot rec = getLastRecording();
-            char buf[64];
-            snprintf(buf, sizeof(buf), "{\"event\":\"audio_ready\",\"size\":%u}",
-                     (unsigned)rec.size);
-            sendText(buf);
-        }
-    }
+    // audio_ready notify disabled — re-enable when STT pipeline is ready
+    // if (now - s_last_audio_check_ms >= AUDIO_CHECK_INTERVAL_MS) {
+    //     s_last_audio_check_ms = now;
+    //     if (hasLastRecording()) {
+    //         RecordingSnapshot rec = getLastRecording();
+    //         char buf[64];
+    //         snprintf(buf, sizeof(buf), "{\"event\":\"audio_ready\",\"size\":%u}",
+    //                  (unsigned)rec.size);
+    //         sendText(buf);
+    //     }
+    // }
 
     // Touch detection (state already updated by M5StackChan.update() in loop)
     bool touched = (M5.Touch.getCount() > 0) && M5.Touch.getDetail(0).wasPressed();
