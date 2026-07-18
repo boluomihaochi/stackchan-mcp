@@ -81,7 +81,7 @@ static void handleMove(JsonDocument& doc) {
     if (!isServoReady()) return;
     float x     = doc["x"]     | 0.0f;
     float y     = doc["y"]     | 0.0f;
-    int   speed = doc["speed"] | 50;
+    int   speed = doc["speed"] | 20;
     servoMove(x, y, speed);
     Serial.printf("[WS] move x=%.1f y=%.1f speed=%d\n", x, y, speed);
 }
@@ -215,7 +215,7 @@ static void dispatchTextCmd(uint8_t* payload, size_t length) {
     if (strcmp(cmd, "play_url") == 0) { handlePlayUrl(doc); return; }
     if (strcmp(cmd, "face")     == 0) { handleFace(doc);    return; }
     if (strcmp(cmd, "move")     == 0) { handleMove(doc);    return; }
-    if (strcmp(cmd, "home")     == 0) { if (isServoReady()) servoHome(50);  return; }
+    if (strcmp(cmd, "home")     == 0) { if (isServoReady()) servoHome(20);  return; }
     if (strcmp(cmd, "nod")      == 0) { if (isServoReady()) servoNod();     return; }
     if (strcmp(cmd, "shake")    == 0) { if (isServoReady()) servoShake();   return; }
     if (strcmp(cmd, "snapshot") == 0) { handleSnapshot();   return; }
