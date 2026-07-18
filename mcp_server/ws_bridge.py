@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from concurrent.futures import Future
 from typing import Optional
 
@@ -69,12 +70,13 @@ class StackchanBridge:
         self._loop.run_until_complete(self._serve())
 
     async def _serve(self) -> None:
-        # Tolerant keepalive: 40s pong grace rides out cross-ocean latency
-        # spikes, while still reaping zombie connections the hotspot leaves
-        # behind (with pings fully off, dead sockets look connected forever
-        # and commands vanish into them)
+        # Protocol-level pings are OFF: the firmware never answers them, so
+        # any ping_interval/ping_timeout combo kills healthy links right on
+        # schedule (20+40 => the exact 61s deaths). Liveness is handled by an
+        # app-level ping task instead — the firmware answers {"cmd":"ping"}
+        # with {"event":"pong"} — see _keepalive().
         async with websockets.serve(self._handle_connection, self.host, self.port,
-                                    ping_interval=20, ping_timeout=40):
+                                    ping_interval=None):
             logger.info("[WS bridge] listening on ws://%s:%d", self.host, self.port)
             await asyncio.Future()  # run forever
 
@@ -84,8 +86,11 @@ class StackchanBridge:
         peer = ws.remote_address
         logger.info("[WS bridge] Stackchan connected from %s", peer)
         self._ws = ws
+        self._last_rx = time.time()
+        keeper = asyncio.ensure_future(self._keepalive(ws))
         try:
             async for message in ws:
+                self._last_rx = time.time()
                 if isinstance(message, bytes):
                     await self._on_binary(message)
                 else:
@@ -93,8 +98,29 @@ class StackchanBridge:
         except websockets.exceptions.ConnectionClosed:
             logger.info("[WS bridge] Stackchan disconnected from %s", peer)
         finally:
+            keeper.cancel()
             if self._ws is ws:
                 self._ws = None
+
+    async def _keepalive(self, ws) -> None:
+        """App-level liveness: firmware answers {"cmd":"ping"} with a pong
+        event. Any inbound traffic counts as life; 65s of silence after our
+        pings means the socket is a zombie — close it so commands stop
+        vanishing into it and the firmware reconnects fresh."""
+        try:
+            while True:
+                await asyncio.sleep(20)
+                try:
+                    await ws.send('{"cmd": "ping"}')
+                except websockets.exceptions.ConnectionClosed:
+                    return
+                if time.time() - self._last_rx > 65:
+                    logger.info("[WS bridge] no traffic for 65s, reaping zombie %s",
+                                ws.remote_address)
+                    await ws.close()
+                    return
+        except asyncio.CancelledError:
+            pass
 
     async def _on_text(self, raw: str) -> None:
         try:
@@ -111,8 +137,12 @@ class StackchanBridge:
             logger.info("[WS bridge] Stackchan ready, IP=%s", self.stackchan_ip)
 
         elif ev == "audio_ready":
-            # Auto-poll the recorded audio
-            await self._send_json({"cmd": "audio_poll"})
+            # Do NOT auto-poll: pushing the ~256KB WAV through a weak uplink
+            # stalls the WS heartbeat and kills the connection (the all-day
+            # "random" disconnects). Poll explicitly via get_audio() when the
+            # voice pipeline actually wants the recording.
+            logger.info("[WS bridge] audio_ready (%s bytes) - not auto-polling",
+                        event.get("size", "?"))
 
         elif ev in ("touch", "shake"):
             with self._events_lock:
