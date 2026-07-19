@@ -24,7 +24,7 @@ _MODEL = Path(__file__).parent.parent / "models" / "face_detection_yunet_2023mar
 _FRAME_W, _FRAME_H = 320, 240
 _FOV_X_DEG = 55.0
 _FOV_Y_DEG = 42.0
-_DAMPING = 0.55          # fraction of measured offset corrected per step
+_DAMPING = 0.8           # fraction of measured offset corrected per step (RTT慢，步子迈大点)
 _DEADBAND = 0.08         # |offset| below this (normalized) = centered, don't move
 _LOST_AFTER = 5          # misses before we consider her gone
 _SEARCH_YAWS = [0.0, -40.0, 40.0, -80.0, 80.0]  # sweep pattern when lost
@@ -98,6 +98,12 @@ class FaceTracker:
         self.pitch = max(5.0, min(85.0, pitch))
         self.bridge.servo_move(self.yaw, self.pitch, speed=25)
 
+    def _set_face(self, name: str) -> None:
+        try:
+            self.bridge.set_face(name)
+        except Exception:
+            pass
+
     def _run(self) -> None:
         misses = 0
         search_i = 0
@@ -130,8 +136,16 @@ class FaceTracker:
                 cx, cy = hit
                 misses = 0
                 search_i = 0
+                if self.status in ("lost", "searching"):
+                    # 找到了！开心一下，几秒后回平静
+                    logger.info("[tracker] found her!")
+                    self._set_face("happy")
+                    self._happy_at = time.time()
                 self.status = "tracking"
                 self.last_seen = time.time()
+                if getattr(self, "_happy_at", None) and time.time() - self._happy_at > 5:
+                    self._happy_at = None
+                    self._set_face("calm")
                 if abs(cx) > _DEADBAND or abs(cy) > _DEADBAND:
                     dyaw = cx * (_FOV_X_DEG / 2) * _DAMPING * self.flip_x
                     dpitch = -cy * (_FOV_Y_DEG / 2) * _DAMPING * self.flip_y
@@ -147,7 +161,8 @@ class FaceTracker:
                 misses += 1
                 if misses == _LOST_AFTER:
                     self.status = "lost"
-                    logger.info("[tracker] face lost")
+                    logger.info("[tracker] face lost - anxious")
+                    self._set_face("anxious")   # 找不到她，着急
                 if misses >= _LOST_AFTER and misses % 3 == 0:
                     # lazy search sweep: step through preset yaws
                     self.status = "searching"
