@@ -210,7 +210,7 @@ void updateMicrophone() {
                     pre_buf_full  = false;
                     silence_start_ms = 0;
                     mic_state = MIC_RECORDING;
-                    setFaceExpression(FACE_LISTENING);
+                    // setFaceExpression(FACE_LISTENING);  // listen停用：麦克风不抢脸
                     Serial.printf("[MIC] Triggered -> RECORDING (pre-buffer: %u samples)\n",
                                   (unsigned)recorded_samples);
                 }
@@ -240,11 +240,11 @@ void updateMicrophone() {
                 mic_state = MIC_SENDING;
                 Serial.printf("[MIC] Record end: samples=%u reason=%s\n",
                               (unsigned)recorded_samples, maxed ? "max" : "silence");
-                setFaceExpression(FACE_THINKING);
+                // setFaceExpression(FACE_THINKING);   // listen停用：麦克风不抢脸
 
                 bool ok = storeRecordingForMcp(record_buffer, recorded_samples);
                 Serial.printf("[MIC] Store recording result=%s\n", ok ? "OK" : "NG");
-                if (!ok) setFaceExpression(FACE_IDLE);
+                // if (!ok) setFaceExpression(FACE_IDLE);  // listen停用
                 mic_state = MIC_IDLE;
             }
             break;
@@ -268,6 +268,6 @@ static bool storeRecordingForMcp(int16_t* audio_data, size_t sample_count) {
     storeLastRecording(wav, wav_size);
     free(wav);
     logAudioMemory("mic-store");
-    setFaceExpression(FACE_IDLE);
+    // setFaceExpression(FACE_IDLE);  // listen停用：麦克风不抢脸
     return true;
 }
