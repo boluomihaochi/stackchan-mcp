@@ -151,6 +151,8 @@ class StackchanBridge:
                     self._events.pop(0)
             if ev == "shake":
                 await self._on_shake()
+            elif ev == "touch":
+                await self._on_touch(event.get("zone", "center"))
 
         elif ev == "pong":
             pass  # heartbeat response
@@ -191,6 +193,27 @@ class StackchanBridge:
                 await asyncio.sleep(8)
                 await self._send_json({"cmd": "face", "face": "calm"})
             asyncio.ensure_future(_calm_down())
+
+    # 摸头自动反应：左→亲亲 中→害羞 右→开心，6秒后恢复平静
+    _TOUCH_FACES = {"left": "kiss", "center": "shy", "right": "happy"}
+
+    async def _on_touch(self, zone: str) -> None:
+        now = time.time()
+        if now - getattr(self, "_last_touch_react", 0) < 2.5:   # 连戳不刷屏
+            return
+        self._last_touch_react = now
+        face = self._TOUCH_FACES.get(zone, "shy")
+        logger.info("[WS bridge] touch %s -> %s", zone, face)
+        await self._send_json({"cmd": "face", "face": face})
+        self._touch_gen = getattr(self, "_touch_gen", 0) + 1
+        gen = self._touch_gen
+
+        async def _back_to_calm():
+            await asyncio.sleep(6)
+            # 期间又被摸了就让新的反应接管，别抢着变回平静
+            if self._touch_gen == gen:
+                await self._send_json({"cmd": "face", "face": "calm"})
+        asyncio.ensure_future(_back_to_calm())
 
     async def _on_binary(self, data: bytes) -> None:
         if len(data) < 1:
