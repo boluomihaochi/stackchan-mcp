@@ -29,6 +29,15 @@ _DEADBAND = 0.08         # |offset| below this (normalized) = centered, don't mo
 _LOST_AFTER = 3          # misses before we consider her gone
 _SEARCH_YAWS = [0.0, -40.0, 40.0, -80.0, 80.0]  # sweep pattern when lost
 
+# 丢人太久就开口叫她（小诺钦点：一直不去找它的话让它说话叫人）
+_CALL_AFTER_S = 120.0    # 丢人这么久后开始叫
+_CALL_COOLDOWN_S = 300.0 # 两次呼唤至少隔这么久
+_CALL_URLS = [
+    "http://49.232.244.139:5060/call_1.wav",
+    "http://49.232.244.139:5060/call_2.wav",
+    "http://49.232.244.139:5060/call_3.wav",
+]
+
 
 class FaceTracker:
     def __init__(self, bridge) -> None:
@@ -172,6 +181,20 @@ class FaceTracker:
                     except Exception:
                         pass
                     search_i += 1
+
+                # 丢人太久，开口叫她
+                now = time.time()
+                lost_long = self.last_seen and now - self.last_seen > _CALL_AFTER_S
+                cooled = now - getattr(self, "_last_call", 0) > _CALL_COOLDOWN_S
+                if lost_long and cooled:
+                    self._last_call = now
+                    import random
+                    url = random.choice(_CALL_URLS)
+                    logger.info("[tracker] calling her: %s", url)
+                    try:
+                        self.bridge.play_url(url)
+                    except Exception:
+                        pass
 
             # pace the loop: relay RTT already adds ~1s; don't hammer the link
             self._stop.wait(1.2)
