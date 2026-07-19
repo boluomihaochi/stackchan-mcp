@@ -7,24 +7,28 @@
 #include <SPIFFS.h>
 
 // ── Face file paths in SPIFFS ──────────────────
+// v2 (2026-07-19): 闲鱼画师10表情版
 static const char* FACE_FILES[] = {
-    "/A_calm_320x240.png",      // WHALE_CALM
-    "/B_thinking_320x240.png",  // WHALE_THINKING
-    "/C_happy_320x240.png",     // WHALE_HAPPY
-    "/D_sleepy_320x240.png",    // WHALE_SLEEPY
-    "/E_shy_320x240.png",       // WHALE_SHY
-    "/F_smug_320x240.png",      // WHALE_SMUG
-    "/G_pouty_320x240.png",     // WHALE_POUTY
+    "/A_calm_320x240.png",       // WHALE_CALM
+    "/B_happy_320x240.png",      // WHALE_HAPPY
+    "/C_sad_320x240.png",        // WHALE_SAD
+    "/D_sleep_320x240.png",      // WHALE_SLEEP
+    "/E_surprised_320x240.png",  // WHALE_SURPRISED
+    "/F_shy_320x240.png",        // WHALE_SHY
+    "/G_smug_320x240.png",       // WHALE_SMUG
+    "/H_kiss_320x240.png",       // WHALE_KISS
+    "/I_angry_320x240.png",      // WHALE_ANGRY
+    "/J_anxious_320x240.png",    // WHALE_ANXIOUS
 };
-static const int NUM_FACES = 7;
+static const int NUM_FACES = 10;
 
 static WhaleFace currentFace = WHALE_CALM;
 static bool spiffsReady = false;
 static bool isTalking = false;
 
 // Preloaded PNG buffers in PSRAM for fast switching
-static uint8_t* faceBuffers[7] = {nullptr};
-static size_t   faceSizes[7]   = {0};
+static uint8_t* faceBuffers[10] = {nullptr};
+static size_t   faceSizes[10]   = {0};
 
 // ── Internal: preload PNGs into PSRAM ──────────
 static bool preloadFaces() {
