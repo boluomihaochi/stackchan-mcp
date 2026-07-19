@@ -224,6 +224,16 @@ static void dispatchTextCmd(uint8_t* payload, size_t length) {
     if (strcmp(cmd, "nod")      == 0) { if (isServoReady()) servoNod();     return; }
     if (strcmp(cmd, "shake")    == 0) { if (isServoReady()) servoShake();   return; }
     if (strcmp(cmd, "snapshot") == 0) { handleSnapshot();   return; }
+    if (strcmp(cmd, "sleep_mode") == 0) {
+        setWhaleFace(WHALE_SLEEP);
+        servoSleep();
+        return;
+    }
+    if (strcmp(cmd, "wake_mode") == 0) {
+        setWhaleFace(WHALE_CALM);
+        servoWake();
+        return;
+    }
     // listen 停用（2026-07-19 小诺拍板）：不再上传录音。
     // 256KB 单帧曾是断连元凶；要恢复语音管线时把下一行换回 handleAudioPoll()
     if (strcmp(cmd, "audio_poll") == 0) { sendText("{\"event\":\"audio_disabled\"}"); return; }

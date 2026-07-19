@@ -56,6 +56,12 @@ bool servoNod();
 // Shake "no" gesture
 bool servoShake();
 
+// Sleep: disable torque so head droops naturally; shows sleep face
+bool servoSleep();
+
+// Wake: re-enable torque and return to home position
+bool servoWake();
+
 // Advance any active non-blocking gesture. Call from loop().
 void updateServoGesture();
 

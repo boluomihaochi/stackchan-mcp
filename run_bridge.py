@@ -56,6 +56,10 @@ def _dispatch(req: dict) -> None:
                           int(req.get("speed", 20)))
     elif cmd == "play_url":
         bridge.play_url(req.get("url", ""))
+    elif cmd == "sleep_mode":
+        bridge.sleep_mode()
+    elif cmd == "wake_mode":
+        bridge.wake_mode()
     else:
         raise ValueError(f"unknown cmd: {cmd}")
 

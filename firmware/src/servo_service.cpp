@@ -126,6 +126,24 @@ bool servoShake() {
     return true;
 }
 
+bool servoSleep() {
+    if (!servoReady) return false;
+    cancelGesture();
+    M5StackChan.Motion.setTorqueEnabled(false);
+    Serial.println("[SERVO] Sleep: torque off");
+    return true;
+}
+
+bool servoWake() {
+    if (!servoReady) return false;
+    cancelGesture();
+    M5StackChan.Motion.setTorqueEnabled(true);
+    M5StackChan.Motion.goHome(300);
+    noteCommand(0, 0, 300);
+    Serial.println("[SERVO] Wake: torque on, going home");
+    return true;
+}
+
 void updateServoGesture() {
     if (!servoReady || activeGesture == GESTURE_NONE) return;
 

@@ -56,6 +56,11 @@ class StackchanBridge:
         # Last known Stackchan IP (from the "ready" event)
         self.stackchan_ip: str = ""
 
+        # Idle-sleep mode: after _IDLE_SLEEP_S of no activity → sleep_mode
+        self._idle_sleep_s: float = 1800.0  # 30 minutes
+        self._last_activity: float = time.time()
+        self._sleeping: bool = False
+
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -78,6 +83,7 @@ class StackchanBridge:
         async with websockets.serve(self._handle_connection, self.host, self.port,
                                     ping_interval=None):
             logger.info("[WS bridge] listening on ws://%s:%d", self.host, self.port)
+            asyncio.ensure_future(self._idle_watcher())
             await asyncio.Future()  # run forever
 
     # ── WebSocket connection handler ────────────────────────────────────────
@@ -175,10 +181,31 @@ class StackchanBridge:
                 fut.set_exception(RuntimeError(f"snapshot failed: {event}"))
             self._snapshot_future = None
 
+    def _bump_activity(self) -> None:
+        """Reset idle timer; wake if sleeping."""
+        self._last_activity = time.time()
+
+    async def _idle_watcher(self) -> None:
+        """Sleep after idle_sleep_s of inactivity; re-check every 60s."""
+        while True:
+            await asyncio.sleep(60)
+            if not self._ws:
+                continue
+            idle = time.time() - self._last_activity
+            if idle >= self._idle_sleep_s and not self._sleeping:
+                self._sleeping = True
+                logger.info("[WS bridge] idle %.0fs → sleep_mode", idle)
+                await self._send_json({"cmd": "sleep_mode"})
+
     async def _on_shake(self) -> None:
         """摇多了会生气：8秒内2次shake → 生气脸，8秒后消气回calm。
         （固件IMU判定很严：50ms内Δ加速度>2.8g才算一次shake，事件本来就稀，
         所以桥这边2次就够生气了）"""
+        self._bump_activity()
+        if self._sleeping:
+            self._sleeping = False
+            await self._send_json({"cmd": "wake_mode"})
+            return
         now = time.time()
         self._shake_times = [t for t in getattr(self, "_shake_times", []) if now - t < 8.0]
         self._shake_times.append(now)
@@ -198,7 +225,15 @@ class StackchanBridge:
     _TOUCH_FACES = {"left": "kiss", "center": "shy", "right": "happy"}
 
     async def _on_touch(self, zone: str) -> None:
+        self._bump_activity()
         now = time.time()
+        if self._sleeping:
+            # 从睡眠唤醒：先wake，冷却后再允许下一次表情反应
+            self._sleeping = False
+            logger.info("[WS bridge] touch while sleeping → wake_mode")
+            await self._send_json({"cmd": "wake_mode"})
+            self._last_touch_react = now
+            return
         if now - getattr(self, "_last_touch_react", 0) < 2.5:   # 连戳不刷屏
             return
         self._last_touch_react = now
@@ -322,6 +357,17 @@ class StackchanBridge:
         ])
         frame = header + session_bytes + pcm_data
         self._run_coro(self._send_binary(frame), timeout)
+
+    def sleep_mode(self, timeout: float = 5.0) -> None:
+        self.require_connected()
+        self._sleeping = True
+        self._run_coro(self._send_json({"cmd": "sleep_mode"}), timeout)
+
+    def wake_mode(self, timeout: float = 5.0) -> None:
+        self.require_connected()
+        self._sleeping = False
+        self._bump_activity()
+        self._run_coro(self._send_json({"cmd": "wake_mode"}), timeout)
 
     def pop_events(self) -> list[dict]:
         """Drain and return all buffered touch/shake events."""
