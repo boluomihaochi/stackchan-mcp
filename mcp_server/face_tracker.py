@@ -26,7 +26,7 @@ _FOV_X_DEG = 55.0
 _FOV_Y_DEG = 42.0
 _DAMPING = 0.8           # fraction of measured offset corrected per step (RTT慢，步子迈大点)
 _DEADBAND = 0.08         # |offset| below this (normalized) = centered, don't move
-_LOST_AFTER = 5          # misses before we consider her gone
+_LOST_AFTER = 3          # misses before we consider her gone
 _SEARCH_YAWS = [0.0, -40.0, 40.0, -80.0, 80.0]  # sweep pattern when lost
 
 
@@ -166,6 +166,7 @@ class FaceTracker:
                 if misses >= _LOST_AFTER and misses % 3 == 0:
                     # lazy search sweep: step through preset yaws
                     self.status = "searching"
+                    self._set_face("anxious")   # 巡视全程保持着急脸（开心5秒回平静会盖掉它）
                     try:
                         self._move(_SEARCH_YAWS[search_i % len(_SEARCH_YAWS)], 8.0)
                     except Exception:
