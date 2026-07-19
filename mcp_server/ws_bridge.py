@@ -174,14 +174,17 @@ class StackchanBridge:
             self._snapshot_future = None
 
     async def _on_shake(self) -> None:
-        """摇多了会生气：10秒内3次shake → 生气脸，8秒后消气回calm。"""
+        """摇多了会生气：8秒内2次shake → 生气脸，8秒后消气回calm。
+        （固件IMU判定很严：50ms内Δ加速度>2.8g才算一次shake，事件本来就稀，
+        所以桥这边2次就够生气了）"""
         now = time.time()
-        self._shake_times = [t for t in getattr(self, "_shake_times", []) if now - t < 10.0]
+        self._shake_times = [t for t in getattr(self, "_shake_times", []) if now - t < 8.0]
         self._shake_times.append(now)
-        if len(self._shake_times) >= 3 and now - getattr(self, "_last_anger", 0) > 12.0:
+        logger.info("[WS bridge] shake #%d in window", len(self._shake_times))
+        if len(self._shake_times) >= 2 and now - getattr(self, "_last_anger", 0) > 12.0:
             self._last_anger = now
             self._shake_times.clear()
-            logger.info("[WS bridge] shaken 3x in 10s - angry!")
+            logger.info("[WS bridge] shaken 2x in 8s - angry!")
             await self._send_json({"cmd": "face", "face": "pouty"})
 
             async def _calm_down():
