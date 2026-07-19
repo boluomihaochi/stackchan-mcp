@@ -25,6 +25,9 @@ start_audio_server(config.audio_serve_port)
 bridge = get_bridge(port=config.ws_bridge_port)
 logging.info("bridge up: ws=%d audio=%d", config.ws_bridge_port, config.audio_serve_port)
 
+from mcp_server.face_tracker import FaceTracker
+tracker = FaceTracker(bridge)
+
 # ── Local control endpoint (127.0.0.1 only) ──────────────────────────────────
 # POST /cmd  {"cmd": "nod"|"shake"|"home"|"face"|"move"|"play_url"|"status", ...}
 import json
@@ -80,7 +83,33 @@ class ControlHandler(BaseHTTPRequestHandler):
             if cmd == "status":
                 self._reply(200, {"connected": bridge.connected,
                                   "pending": len(_pending),
+                                  "tracking": tracker.status,
                                   "events": bridge.pop_events()})
+                return
+            if cmd == "track_start":
+                if tracker.running:
+                    self._reply(200, {"ok": True, "note": "already tracking"})
+                    return
+                tracker.start(flip_x=float(req.get("flip_x", 1)),
+                              flip_y=float(req.get("flip_y", 1)))
+                self._reply(200, {"ok": True, "cmd": cmd})
+                return
+            if cmd == "track_stop":
+                tracker.stop()
+                self._reply(200, {"ok": True, "cmd": cmd})
+                return
+            if cmd == "snapshot":
+                if not bridge.connected:
+                    self._reply(503, {"error": "link down, try again"})
+                    return
+                data = bridge.request_snapshot(
+                    wait_timeout=float(req.get("timeout", 30)))
+                path = Path("/root/stackchan-mcp/snapshots")
+                path.mkdir(exist_ok=True)
+                fn = path / f"snap_{int(_time.time())}.jpg"
+                fn.write_bytes(data)
+                self._reply(200, {"ok": True, "path": str(fn),
+                                  "bytes": len(data)})
                 return
             if not bridge.connected:
                 with _pending_lock:

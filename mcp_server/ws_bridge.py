@@ -149,6 +149,8 @@ class StackchanBridge:
                 self._events.append(event)
                 if len(self._events) > 32:
                     self._events.pop(0)
+            if ev == "shake":
+                await self._on_shake()
 
         elif ev == "pong":
             pass  # heartbeat response
@@ -170,6 +172,22 @@ class StackchanBridge:
             if fut and not fut.done():
                 fut.set_exception(RuntimeError(f"snapshot failed: {event}"))
             self._snapshot_future = None
+
+    async def _on_shake(self) -> None:
+        """摇多了会生气：10秒内3次shake → 生气脸，8秒后消气回calm。"""
+        now = time.time()
+        self._shake_times = [t for t in getattr(self, "_shake_times", []) if now - t < 10.0]
+        self._shake_times.append(now)
+        if len(self._shake_times) >= 3 and now - getattr(self, "_last_anger", 0) > 12.0:
+            self._last_anger = now
+            self._shake_times.clear()
+            logger.info("[WS bridge] shaken 3x in 10s - angry!")
+            await self._send_json({"cmd": "face", "face": "pouty"})
+
+            async def _calm_down():
+                await asyncio.sleep(8)
+                await self._send_json({"cmd": "face", "face": "calm"})
+            asyncio.ensure_future(_calm_down())
 
     async def _on_binary(self, data: bytes) -> None:
         if len(data) < 1:

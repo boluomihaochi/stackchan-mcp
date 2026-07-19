@@ -20,6 +20,7 @@ from .audio_server import start_audio_server
 from .mcp_tools import register_tools
 from .stackchan_client import StackchanClient
 from .stackchan_config import StackchanConfig, config_summary, load_config
+from .ws_bridge import get_bridge
 
 
 def parse_args(argv: list[str]) -> tuple[bool, str, int]:
@@ -79,6 +80,8 @@ if __name__ == "__main__":
     http_mode, mcp_host, mcp_port = parse_args(sys.argv)
     mcp = create_mcp(config, http_mode=http_mode, host=mcp_host, port=mcp_port)
     start_audio_server(config.audio_serve_port)
+    if config.ws_bridge_enabled:
+        get_bridge(port=config.ws_bridge_port)
     if http_mode:
         try:
             ensure_http_auth_configured(config)

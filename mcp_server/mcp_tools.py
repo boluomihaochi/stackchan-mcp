@@ -19,6 +19,7 @@ from .stackchan_client import (
 from .stackchan_config import VALID_FACES, StackchanConfig, config_summary
 from .telemetry import emit_event, new_request_id
 from .voice_inbox import clear_events, format_events, read_events
+from .ws_bridge import get_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +295,7 @@ def register_tools(mcp, client: StackchanClient, config: StackchanConfig, image_
             return f"❌ Error: {exc}"
 
     @mcp.tool()
-    def stackchan_move(x: float = 0, y: float = 0, speed: int = 50) -> str:
+    def stackchan_move(x: float = 0, y: float = 0, speed: int = 20) -> str:
         try:
             x = max(-128, min(128, x))
             y = max(0, min(90, y))
@@ -424,5 +425,119 @@ def register_tools(mcp, client: StackchanClient, config: StackchanConfig, image_
         try:
             clear_events()
             return "Stack-chan voice inbox cleared."
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    # ── WS bridge tools (Stackchan connects outbound to VPS) ─────────────────
+
+    @mcp.tool()
+    def stackchan_ws_status() -> str:
+        """Check whether Stackchan is connected to the WS bridge on this VPS."""
+        bridge = get_bridge(port=config.ws_bridge_port)
+        if not bridge.connected:
+            return f"❌ Stackchan not connected (bridge listening on :{config.ws_bridge_port})"
+        return f"✅ Stackchan connected  IP={bridge.stackchan_ip}  bridge=:{config.ws_bridge_port}"
+
+    @mcp.tool()
+    def stackchan_ws_face(expression: str = "calm") -> str:
+        """Switch Stackchan's face via WS bridge. expressions: calm/thinking/happy/sleepy/shy/smug/pouty"""
+        if expression not in VALID_FACES:
+            return f"❌ Unknown expression. Choose from: {', '.join(VALID_FACES)}"
+        try:
+            bridge = get_bridge(port=config.ws_bridge_port)
+            bridge.set_face(expression)
+            faces = {"calm": "😊", "thinking": "🤔", "happy": "🐋", "sleepy": "😴",
+                     "shy": "😳", "smug": "😏", "pouty": "😤"}
+            return f"{faces.get(expression, '🤖')} Face: {expression}"
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_move(x: float = 0, y: float = 0, speed: int = 20) -> str:
+        """Move Stackchan's head via WS bridge. x: -128..128 (pan), y: 0..90 (tilt), speed: 0..100."""
+        try:
+            x = max(-128.0, min(128.0, float(x)))
+            y = max(0.0, min(90.0, float(y)))
+            speed = max(0, min(100, int(speed)))
+            bridge = get_bridge(port=config.ws_bridge_port)
+            bridge.servo_move(x, y, speed)
+            return f"🤖 Head → x={x:.0f}° y={y:.0f}° speed={speed}%"
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_home() -> str:
+        """Return Stackchan's head to center via WS bridge."""
+        try:
+            get_bridge(port=config.ws_bridge_port).servo_home()
+            return "🤖 Head returned to home"
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_nod() -> str:
+        try:
+            get_bridge(port=config.ws_bridge_port).servo_nod()
+            return "🤖 *nods*"
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_shake() -> str:
+        try:
+            get_bridge(port=config.ws_bridge_port).servo_shake()
+            return "🤖 *shakes head*"
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool(structured_output=False)
+    def stackchan_ws_see() -> list[object] | str:
+        """Take a snapshot via WS bridge and return the image. Auto-forwards to Telegram if configured."""
+        try:
+            bridge = get_bridge(port=config.ws_bridge_port)
+            jpeg_data = bridge.request_snapshot(wait_timeout=config.http_snapshot_timeout)
+            img_path = AUDIO_DIR / f"cam_{int(time.time()*1000)}.jpg"
+            img_path.write_bytes(jpeg_data)
+            note = f"📷 Snapshot captured ({len(jpeg_data)} bytes)."
+            if config.telegram_bot_token and config.telegram_photo_chat_id:
+                try:
+                    import requests as _req
+                    _req.post(
+                        f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto",
+                        data={"chat_id": config.telegram_photo_chat_id},
+                        files={"photo": ("snapshot.jpg", jpeg_data, "image/jpeg")},
+                        timeout=10,
+                    )
+                    note += " 📨 Forwarded to Telegram."
+                except Exception as tg_exc:
+                    note += f" (Telegram forward failed: {tg_exc})"
+            return [image_cls(data=jpeg_data, format="jpeg"), note]
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_events() -> str:
+        """Drain touch and shake events buffered from Stackchan's WS connection."""
+        try:
+            events = get_bridge(port=config.ws_bridge_port).pop_events()
+            if not events:
+                return "No pending events."
+            return json.dumps(events, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return f"❌ Error: {exc}"
+
+    @mcp.tool()
+    def stackchan_ws_say(text: str, lang: str = "zh") -> str:
+        """Generate TTS and play it on Stackchan via WS bridge.
+        Requires MAC_IP in .env to be set to this VPS's public IP so Stackchan can fetch the audio."""
+        try:
+            start_audio_server(config.audio_serve_port)
+            wav_path = audio_processing.generate_tts(text, lang, config)
+            audio_processing.validate_playback_wav(wav_path)
+            url = audio_url(config.mac_ip, config.audio_serve_port, wav_path.name)
+            bridge = get_bridge(port=config.ws_bridge_port)
+            bridge.play_url(url)
+            preview = text[:60] + ("…" if len(text) > 60 else "")
+            return f"🗣️ Stack-chan is saying: \"{preview}\"  url={url}"
         except Exception as exc:
             return f"❌ Error: {exc}"

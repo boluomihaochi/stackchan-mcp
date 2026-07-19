@@ -121,9 +121,15 @@ class StackchanConfig:
     fish_audio_key: str
     fish_audio_model_zh: str
     fish_audio_model_en: str
+    ws_bridge_port: int = 8765
+    ws_bridge_enabled: bool = True
+    telegram_bot_token: str = ""
+    telegram_photo_chat_id: str = ""
     xunfei_app_id: str = ""
     xunfei_api_key: str = ""
     mcp_auth_token: str = ""
+    edge_tts_rate: str = ""
+    edge_tts_pitch: str = ""
 
 
 VALID_AUDIO_MODES = {"auto", "pcm", "wav"}
@@ -313,7 +319,13 @@ def load_config() -> StackchanConfig:
         fish_audio_key=os.environ.get("FISH_AUDIO_KEY", ""),
         fish_audio_model_zh=os.environ.get("FISH_AUDIO_MODEL_ZH", ""),
         fish_audio_model_en=os.environ.get("FISH_AUDIO_MODEL_EN", ""),
+        ws_bridge_port=env_int("WS_BRIDGE_PORT", 8765),
+        ws_bridge_enabled=env_bool("WS_BRIDGE_ENABLED", True),
+        telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        telegram_photo_chat_id=os.environ.get("TELEGRAM_PHOTO_CHAT_ID", ""),
         xunfei_app_id=os.environ.get("XUNFEI_APP_ID", ""),
         xunfei_api_key=os.environ.get("XUNFEI_API_KEY", ""),
         mcp_auth_token=os.environ.get("STACKCHAN_MCP_AUTH_TOKEN", ""),
+        edge_tts_rate=os.environ.get("EDGE_TTS_RATE", ""),
+        edge_tts_pitch=os.environ.get("EDGE_TTS_PITCH", ""),
     )

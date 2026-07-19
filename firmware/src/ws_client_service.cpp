@@ -108,7 +108,7 @@ static void handleSnapshot() {
     Serial.printf("[WS] snapshot sent: %u bytes\n", (unsigned)jlen);
 }
 
-static void handleAudioPoll() {
+[[maybe_unused]] static void handleAudioPoll() {
     RecordingSnapshot rec = getLastRecording();
     if (!rec.data || rec.size == 0) {
         sendText("{\"event\":\"audio_empty\"}");
@@ -219,7 +219,9 @@ static void dispatchTextCmd(uint8_t* payload, size_t length) {
     if (strcmp(cmd, "nod")      == 0) { if (isServoReady()) servoNod();     return; }
     if (strcmp(cmd, "shake")    == 0) { if (isServoReady()) servoShake();   return; }
     if (strcmp(cmd, "snapshot") == 0) { handleSnapshot();   return; }
-    if (strcmp(cmd, "audio_poll") == 0) { handleAudioPoll(); return; }
+    // listen 停用（2026-07-19 小诺拍板）：不再上传录音。
+    // 256KB 单帧曾是断连元凶；要恢复语音管线时把下一行换回 handleAudioPoll()
+    if (strcmp(cmd, "audio_poll") == 0) { sendText("{\"event\":\"audio_disabled\"}"); return; }
 
     Serial.printf("[WS] unknown cmd: %s\n", cmd);
 }

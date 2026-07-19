@@ -100,16 +100,13 @@ def tts_edge(text: str, lang: str, config: StackchanConfig) -> Path:
     temp_wav_path = TEMP_AUDIO_DIR / f"{stem}.wav"
     ffmpeg_bin = require_executable("ffmpeg")
     try:
+        edge_args = [config.edge_tts_bin, "--voice", voice, "--text", text, "--write-media", str(mp3_path)]
+        if config.edge_tts_rate:
+            edge_args += ["--rate", config.edge_tts_rate]
+        if config.edge_tts_pitch:
+            edge_args += ["--pitch", config.edge_tts_pitch]
         subprocess.run(  # noqa: S603 - shell=False and executable/args are controlled.
-            [
-                config.edge_tts_bin,
-                "--voice",
-                voice,
-                "--text",
-                text,
-                "--write-media",
-                str(mp3_path),
-            ],
+            edge_args,
             check=True,
             capture_output=True,
         )
