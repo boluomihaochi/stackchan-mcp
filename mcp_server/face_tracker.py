@@ -37,8 +37,9 @@ class FaceTracker:
         self._stop = threading.Event()
         self._detector = None
         # Head pose estimate (firmware is open-loop; we mirror what we command)
+        # home = (yaw 0, pitch 0=平视)；pitch增大是抬头，别学上次一上来45°望天
         self.yaw = 0.0
-        self.pitch = 45.0
+        self.pitch = 5.0
         self.flip_x = 1.0
         self.flip_y = 1.0
         self.status = "off"    # off | tracking | lost | searching
@@ -100,6 +101,13 @@ class FaceTracker:
     def _run(self) -> None:
         misses = 0
         search_i = 0
+        # 起步先归位，让内部估计和真实姿态对齐
+        try:
+            self.bridge.servo_home()
+            self.yaw, self.pitch = 0.0, 5.0
+            time.sleep(1.5)
+        except Exception:
+            pass
         while not self._stop.is_set():
             if not self.bridge.connected:
                 self.status = "lost"
@@ -127,10 +135,14 @@ class FaceTracker:
                 if abs(cx) > _DEADBAND or abs(cy) > _DEADBAND:
                     dyaw = cx * (_FOV_X_DEG / 2) * _DAMPING * self.flip_x
                     dpitch = -cy * (_FOV_Y_DEG / 2) * _DAMPING * self.flip_y
+                    logger.info("[tracker] face at (%.2f,%.2f) -> move yaw %.0f%+.0f pitch %.0f%+.0f",
+                                cx, cy, self.yaw, dyaw, self.pitch, dpitch)
                     try:
                         self._move(self.yaw + dyaw, self.pitch + dpitch)
                     except Exception as exc:
                         logger.debug("[tracker] move failed: %s", exc)
+                else:
+                    logger.info("[tracker] face centered (%.2f,%.2f)", cx, cy)
             else:
                 misses += 1
                 if misses == _LOST_AFTER:
@@ -140,7 +152,7 @@ class FaceTracker:
                     # lazy search sweep: step through preset yaws
                     self.status = "searching"
                     try:
-                        self._move(_SEARCH_YAWS[search_i % len(_SEARCH_YAWS)], 45.0)
+                        self._move(_SEARCH_YAWS[search_i % len(_SEARCH_YAWS)], 8.0)
                     except Exception:
                         pass
                     search_i += 1
