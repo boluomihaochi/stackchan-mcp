@@ -30,6 +30,11 @@ static long     s_pcm_next_seq = 0;
 static unsigned long s_last_audio_check_ms = 0;
 static constexpr unsigned long AUDIO_CHECK_INTERVAL_MS = 300;
 
+// Client-side app heartbeat — 焐热蜂窝热点的NAT转发表，防"假死"
+// （运营商/手机会划掉不活跃条目，之后双向静默；客户端定时吱一声保活跃）
+static unsigned long s_last_hb_ms = 0;
+static constexpr unsigned long HB_INTERVAL_MS = 15000;
+
 // Touch de-bounce
 static bool s_was_touched = false;
 
@@ -285,6 +290,12 @@ void serviceWsClient() {
     if (!s_connected) return;
 
     unsigned long now = millis();
+
+    // NAT保活心跳：15秒一个小包，桥收到任何流量都算活
+    if (now - s_last_hb_ms >= HB_INTERVAL_MS) {
+        s_last_hb_ms = now;
+        sendText("{\"event\":\"hb\"}");
+    }
 
     // audio_ready notify disabled — re-enable when STT pipeline is ready
     // if (now - s_last_audio_check_ms >= AUDIO_CHECK_INTERVAL_MS) {
